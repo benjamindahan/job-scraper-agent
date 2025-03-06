@@ -1,0 +1,10 @@
+langgraph
+langchain-core
+langchain-openai
+langchain-community
+beautifulsoup4
+requests
+aiosqlite
+pypdf
+python-docx
+pydantic
