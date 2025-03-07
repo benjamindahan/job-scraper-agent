@@ -4,7 +4,7 @@ Database utilities for storing and retrieving job listings.
 
 import sqlite3
 from typing import List, Dict, Any, Optional, Set
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 
 # Configure logging
@@ -196,8 +196,8 @@ def filter_jobs(min_experience: Optional[int] = None,
             days = None
 
         if days:
-            cutoff_date = (current_date - datetime.timedelta(
-                days=days)).isoformat()
+            cutoff_date = (current_date - timedelta(days=days)).isoformat()
+
             query += ' AND publication_date >= ?'
             params.append(cutoff_date)
 
