@@ -74,6 +74,8 @@ class JobScraperState(TypedDict):
     cv_text: Optional[str]
     cv_data: Optional[Dict[str, Any]]
     waiting_for_cv: Optional[bool]
+    cv_file_path: Optional[str]  # Path to the uploaded CV file
+    cv_file_name: Optional[str]  # Name of the uploaded CV file
 
     # Job selection
     waiting_for_job_selection: Optional[bool]
@@ -84,6 +86,7 @@ class JobScraperState(TypedDict):
 
     # Error handling
     error: Optional[str]
+
 
 # Check for API key
 if not os.getenv("OPENAI_API_KEY"):
@@ -210,17 +213,49 @@ def filter_jobs_node(state: JobScraperState) -> Dict[str, Any]:
         state["error"] = error_msg
         return state
 
+
 def collect_cv(state: JobScraperState) -> Dict[str, Any]:
     log("Entered collect_cv with state keys: " + ", ".join(state.keys()))
     if not state.get("waiting_for_cv"):
         log("Not waiting for CV; exiting collect_cv.")
         return state
+
+    # Check for CV file path or user input
+    cv_file_path = state.get("cv_file_path")
+    cv_file_name = state.get("cv_file_name")
     user_input = state.get("user_input", "")
-    if not user_input:
-        log("No user input for CV; exiting collect_cv.")
+
+    cv_text = ""
+
+    # Process CV file if a path is provided
+    if cv_file_path:
+        log(f"Processing CV file: {cv_file_path}")
+        try:
+            from src.tools.file_utils import extract_text_from_file
+
+            result = extract_text_from_file(file_path=cv_file_path,
+                                            file_name=cv_file_name)
+
+            if result["success"]:
+                cv_text = result["text"]
+                log(f"Extracted {len(cv_text)} characters from CV file")
+            else:
+                log(f"Error extracting text from CV file: {result['error']}")
+        except Exception as e:
+            log(f"Error processing CV file: {e}")
+            cv_text = ""
+
+    # Use user_input if no CV file or extraction failed
+    if not cv_text and user_input:
+        log("Using user input as CV text")
+        cv_text = user_input
+
+    # If no CV text is available, exit early
+    if not cv_text:
+        log("No CV text available; exiting collect_cv.")
         return state
+
     log("Processing CV...")
-    cv_text = user_input
     prompt = ChatPromptTemplate.from_messages([
         SystemMessage(content="""
         You are a CV analysis expert. Extract the following information from the provided CV:
@@ -229,7 +264,7 @@ def collect_cv(state: JobScraperState) -> Dict[str, Any]:
         3. Highest level of education
         4. Previous job titles
         5. Industries worked in
-        
+
         Format your response as a JSON object with the following structure:
         {
             "skills": ["skill1", "skill2", ...],
