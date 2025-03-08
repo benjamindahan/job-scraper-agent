@@ -127,9 +127,42 @@ def get_all_jobs() -> List[Dict[str, Any]]:
         jobs.append(job)
 
     conn.close()
-
+    logger.info(f"Retrieved {len(jobs)} jobs from database")
     return jobs
 
+def get_jobs_by_title(job_title: str, limit: int = 100) -> List[Dict[str, Any]]:
+    """
+    Get jobs matching a specific title from the database.
+
+    Args:
+        job_title: The job title to search for
+        limit: Maximum number of jobs to return
+
+    Returns:
+        List of job dictionaries
+    """
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    query = "SELECT * FROM jobs WHERE job_title LIKE ? ORDER BY publication_date DESC LIMIT ?"
+    cursor.execute(query, (f"%{job_title}%", limit))
+
+    jobs = []
+    for row in cursor.fetchall():
+        job = dict(row)
+        # Convert publication_date string back to datetime if needed
+        if 'publication_date' in job and isinstance(job['publication_date'], str):
+            try:
+                job['publication_date'] = datetime.fromisoformat(
+                    job['publication_date'])
+            except ValueError:
+                pass
+        jobs.append(job)
+
+    conn.close()
+    logger.info(f"Retrieved {len(jobs)} jobs matching '{job_title}' from database")
+    return jobs
 
 def get_unique_locations() -> List[str]:
     """
@@ -220,7 +253,7 @@ def filter_jobs(min_experience: Optional[int] = None,
         jobs.append(job)
 
     conn.close()
-
+    logger.info(f"Filtered to {len(jobs)} jobs matching preferences")
     return jobs
 
 

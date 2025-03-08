@@ -1,14 +1,17 @@
 """
-Scraping tools for job listings from jobs.secrettelaviv.com.
+Scraping tools for job listings with enhanced anti-blocking measures.
 """
 
 import re
 import asyncio
 import aiohttp
-from datetime import datetime
+import random
+import time
+from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from bs4 import BeautifulSoup
 import logging
+import sqlite3
 
 # Configure logging
 logging.basicConfig(level=logging.INFO,
@@ -18,30 +21,151 @@ logger = logging.getLogger(__name__)
 # Base URL for the job site
 BASE_URL = "https://jobs.secrettelaviv.com"
 
+# Database path (used for caching)
+DB_PATH = "jobs.db"
 
-async def fetch_page(url: str, session: aiohttp.ClientSession) -> Optional[str]:
-    """Fetch a page using aiohttp and return the HTML content."""
-    try:
-        async with session.get(url, headers={
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }) as response:
-            if response.status == 200:
-                return await response.text()
-            logger.error(f"Failed to fetch {url}: HTTP {response.status}")
+# Rotating user agents to avoid blocking
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1',
+    'Mozilla/5.0 (iPad; CPU OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36 Edg/91.0.864.59',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36'
+]
+
+def get_random_user_agent():
+    """Get a random user agent from the list."""
+    return random.choice(USER_AGENTS)
+
+async def fetch_page(url: str, session: aiohttp.ClientSession, retry_count: int = 3) -> Optional[str]:
+    """
+    Fetch a page using aiohttp with exponential backoff retry logic and rotating user agents.
+
+    Args:
+        url: URL to fetch
+        session: aiohttp ClientSession
+        retry_count: Number of retries on failure
+
+    Returns:
+        HTML content as string or None if failed
+    """
+    base_delay = 0.5  # Start with 500ms delay
+
+    for attempt in range(retry_count + 1):
+        try:
+            # Add delay with exponential backoff
+            if attempt > 0:
+                delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                await asyncio.sleep(delay)
+                logger.info(f"Retry attempt {attempt}/{retry_count} for {url} after {delay:.2f}s delay")
+            else:
+                # Initial delay
+                await asyncio.sleep(base_delay)
+
+            # Get a random user agent for each request
+            user_agent = get_random_user_agent()
+
+            async with session.get(url, headers={
+                'User-Agent': user_agent,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Cache-Control': 'max-age=0'
+            }) as response:
+                if response.status == 200:
+                    return await response.text()
+
+                if response.status == 429:  # Too Many Requests
+                    if attempt < retry_count:
+                        logger.warning(f"Rate limited while fetching {url}. Will retry in {base_delay * (2 ** (attempt+1)):.2f} seconds.")
+                        continue
+                    else:
+                        logger.error(f"Failed to fetch {url} after {retry_count} retries: HTTP 429")
+                        return None
+                else:
+                    logger.error(f"Failed to fetch {url}: HTTP {response.status}")
+                    return None
+        except Exception as e:
+            logger.error(f"Error fetching {url}: {str(e)}")
+            if attempt < retry_count:
+                continue
             return None
+
+    return None
+
+
+def check_cached_jobs(job_title: str, max_age_hours: int = 24) -> List[Dict[str, Any]]:
+    """
+    Check for cached job listings in the database.
+
+    Args:
+        job_title: The job title to search for
+        max_age_hours: Maximum age of cached results in hours
+
+    Returns:
+        List of cached job dictionaries or empty list if no valid cache
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        # Calculate the cutoff time
+        current_time = datetime.now()
+        cutoff_time = (current_time - timedelta(hours=max_age_hours)).isoformat()
+
+        # Look for jobs matching the title and within the age limit
+        query = """
+        SELECT * FROM jobs 
+        WHERE job_title LIKE ? AND created_at > ?
+        ORDER BY publication_date DESC
+        """
+
+        cursor.execute(query, (f"%{job_title}%", cutoff_time))
+
+        jobs = []
+        for row in cursor.fetchall():
+            job = dict(row)
+            if 'publication_date' in job and isinstance(job['publication_date'], str):
+                try:
+                    job['publication_date'] = datetime.fromisoformat(job['publication_date'])
+                except ValueError:
+                    pass
+            jobs.append(job)
+
+        conn.close()
+
+        if jobs:
+            logger.info(f"Found {len(jobs)} cached jobs for '{job_title}' from the last {max_age_hours} hours")
+
+        return jobs
     except Exception as e:
-        logger.error(f"Error fetching {url}: {str(e)}")
-        return None
+        logger.error(f"Error checking cached jobs: {str(e)}")
+        return []
 
 
 async def search_jobs(query: str, session: aiohttp.ClientSession) -> List[Dict[str, Any]]:
     """
     Search for jobs with the given query and return basic information and URLs.
+    First checks cached results, falls back to scraping if needed.
     """
+    # Check for cached results first
+    cached_jobs = check_cached_jobs(query)
+    if cached_jobs:
+        # If we have cached results, use them instead of scraping
+        logger.info(f"Using {len(cached_jobs)} cached job listings for query: {query}")
+        return cached_jobs
+
+    # If no cached results, proceed with scraping
     search_url = f"{BASE_URL}/list/find/?query={'+'.join(query.split())}"
-    html_content = await fetch_page(search_url, session)
+    html_content = await fetch_page(search_url, session, retry_count=5)  # Increased retries
 
     if not html_content:
+        logger.warning(f"No jobs found for query: {query}")
         return []
 
     soup = BeautifulSoup(html_content, 'html.parser')
@@ -128,7 +252,7 @@ async def extract_job_details(job_url: str, session: aiohttp.ClientSession) -> D
     """
     Extract detailed information from a job listing page.
     """
-    html_content = await fetch_page(job_url, session)
+    html_content = await fetch_page(job_url, session, retry_count=3)
     if not html_content:
         return {}
 
@@ -213,24 +337,53 @@ async def extract_job_details(job_url: str, session: aiohttp.ClientSession) -> D
 async def scrape_jobs(job_title: str, max_jobs: int = 20) -> List[Dict[str, Any]]:
     """
     Main function to search for jobs and scrape detailed information.
+    Will use cached results if available.
     """
+    # First check for cached results
+    cached_jobs = check_cached_jobs(job_title)
+    if cached_jobs:
+        # If we have enough cached jobs, return them directly
+        if len(cached_jobs) >= max_jobs:
+            logger.info(f"Using {min(len(cached_jobs), max_jobs)} cached jobs for query: {job_title}")
+            return cached_jobs[:max_jobs]
+        # Otherwise, we'll still do scraping but log that we're supplementing
+        logger.info(f"Found {len(cached_jobs)} cached jobs, but need {max_jobs}. Will scrape additional jobs.")
+
     async with aiohttp.ClientSession() as session:
         # Search for jobs
         job_listings = await search_jobs(job_title, session)
 
         if not job_listings:
+            # If scraping failed but we have some cached results, return those
+            if cached_jobs:
+                logger.warning(f"Scraping failed, using {len(cached_jobs)} cached jobs for query: {job_title}")
+                return cached_jobs
             logger.warning(f"No jobs found for query: {job_title}")
             return []
 
         # Limit the number of jobs to scrape
         job_listings = job_listings[:max_jobs]
 
-        # Scrape detailed information for each job
-        tasks = [extract_job_details(job['job_url'], session) for job in job_listings]
+        # Add random pauses between job detail requests to avoid detection
+        tasks = []
+        for i, job in enumerate(job_listings):
+            if i > 0:
+                # Random pause between detail requests (0.5 to 2.5 seconds)
+                pause = 0.5 + random.random() * 2.0
+                await asyncio.sleep(pause)
+            tasks.append(extract_job_details(job['job_url'], session))
+
         job_details = await asyncio.gather(*tasks)
 
         # Filter out empty results
-        return [job for job in job_details if job]
+        jobs = [job for job in job_details if job]
+
+        if not jobs and cached_jobs:
+            # If all scraping failed but we have cached results, use those
+            logger.warning(f"Detailed scraping failed, using {len(cached_jobs)} cached jobs")
+            return cached_jobs
+
+        return jobs
 
 
 # Example usage (for testing)
@@ -243,8 +396,6 @@ if __name__ == "__main__":
 
         print(f"Searching for '{query}' jobs (max: {max_jobs})...")
         jobs = await scrape_jobs(query, max_jobs)
-
-        print(jobs[0])
 
         print(f"Found {len(jobs)} jobs:")
         for i, job in enumerate(jobs, 1):

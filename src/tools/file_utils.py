@@ -9,13 +9,12 @@ import io
 
 # Configure logging
 logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-
 def extract_text_from_file(file_path: Optional[str] = None,
-                           file_content: Optional[bytes] = None,
-                           file_name: Optional[str] = None) -> Dict[str, Any]:
+                          file_content: Optional[bytes] = None,
+                          file_name: Optional[str] = None) -> Dict[str, Any]:
     """
     Extract text from a CV file (PDF, DOCX, or plain text).
 
@@ -111,8 +110,7 @@ def extract_text_from_file(file_path: Optional[str] = None,
             # Handle text files or other formats
             try:
                 if file_path:
-                    with open(file_path, 'r', encoding='utf-8',
-                              errors='ignore') as f:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                         text = f.read()
                 else:
                     text = file_content.decode('utf-8', errors='ignore')

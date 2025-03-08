@@ -1,0 +1,68 @@
+Contact
+Language
++972 58-418-2831 
+Phone
+benn.dahann@gmail.com
+Email
+Tel Aviv
+Address
+
+Benjamin Dahan
+Data Scientist
+
+Summary:
+Innovative and results-driven Data Scientist with 6 years of experience in data and high-tech. Strong analytical and problem-solving skills with expertise in machine learning and large-scale data processing. Passionate about leveraging cutting-edge technology to tackle complex optimization and prediction challenges.
+
+Experience:
+Data Scientist / Algorithm Engineer
+February 2022 - Present
+Enhanced Recommender System Performance
+- Led the creation and design of a data connector between SFCC and Tableau (Dataviz)
+- Conducted in-depth data analysis and optimization of e-commerce data for clients
+  - Increased Average Conversion Rate by 60%
+  - Reduced Number of Searches without results by 50%
+- Implemented website data tracking plans using GA and GTM
+- Analyzed website performance using BigQuery and Google Analytics
+- Designed analytics dashboards to monitor companies' KPIs using SQL, DataStudio, and Tableau
+
+Algorithm Engineer at Outbrain, Tel Aviv
+September 2019 - September 2021
+
+Solution Architect at Salesforce, Paris
+July 2018 - September 2019
+
+Education:
+Data Science Program, Israel Tech Challenge, Tel Aviv
+2021 - 2022
+- Hands-on experience in ML, DL, Computer Vision & NLP
+- Winner of the 2022 ITC Hackathon for creating a drowsiness detector for drivers
+
+MSc in Management, HEC Paris, University of Paris-Saclay, Paris
+2013 - 2018
+- Major in Digital Business
+- Ranked top 1% out of 10,000 candidates in Probability, Linear Algebra, Statistics, Analysis
+
+"Classe Preparatoire" IPESUP, Bachelor of Maths, Paris
+2010 - 2013
+
+Technical Skills:
+- Programming: Python, SQL, Java
+- Technical tools: Git, Linux, Pydata stack (pandas, sklearn, tensorflow), Big Query, Google Analytics, Tableau, Jira, Confluence, Redash, Grafana
+
+Languages:
+- French (Native), English (Fluent), Spanish (Fluent), Portuguese (Basic), Hebrew (Learning)
+
+Other Activities:
+- Managed a team of 4 developers and 3 designers to create iOS and Android apps
+- Led weekly scrums to define sprint priorities
+- Organized a summer school in Benin in 2014 and 2017
+
+LinkedIn: [Insert Link]
+
+Highlighted Achievements:
+- Led the initiative to improve model CTR prediction by introducing ad-side image-based clusters, boosting RPM by +0.5% and CTR by +0.6%
+- Engineered image embeddings using ResNet v2 and clustered 1M+ images via KMeans
+- Designed a similarity detection service using cosine similarity on image embeddings for fraud detection and ad placement diversity
+- Currently working on optimizing floor prices to maximize revenue inspired by Yahoo research paper
+
+I am excited about the opportunity to bring my expertise in data science and algorithm engineering to Trigo and contribute to impactful research and innovative solutions.

@@ -12,15 +12,14 @@ from src.graph import graph, initial_state_creator, JobScraperState
 
 # Configure logging
 logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-
 async def process_cv_file(
-        file_path: Optional[str] = None,
-        file_content: Optional[bytes] = None,
-        file_name: Optional[str] = None,
-        current_state: Optional[Dict[str, Any]] = None
+    file_path: Optional[str] = None,
+    file_content: Optional[bytes] = None,
+    file_name: Optional[str] = None,
+    current_state: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
     Process a CV file and prepare it for the graph.
@@ -47,8 +46,7 @@ async def process_cv_file(
         logger.error(f"Error extracting text from file: {result['error']}")
         return {'error': result['error']}
 
-    logger.info(
-        f"Successfully extracted {len(result['text'])} characters from file")
+    logger.info(f"Successfully extracted {len(result['text'])} characters from file")
 
     # Get or create graph state
     state = current_state.copy() if current_state else initial_state_creator()
@@ -66,12 +64,11 @@ async def process_cv_file(
 
     return state
 
-
 async def process_cv_file_and_invoke_graph(
-        file_path: Optional[str] = None,
-        file_content: Optional[bytes] = None,
-        file_name: Optional[str] = None,
-        current_state: Optional[Dict[str, Any]] = None
+    file_path: Optional[str] = None,
+    file_content: Optional[bytes] = None,
+    file_name: Optional[str] = None,
+    current_state: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
     Process a CV file and invoke the graph with the extracted text.
@@ -85,23 +82,19 @@ async def process_cv_file_and_invoke_graph(
     Returns:
         Graph result
     """
-    # Process the file
-    state = await process_cv_file(file_path, file_content, file_name,
-                                  current_state)
+    # Process the file first
+    state = await process_cv_file(file_path, file_content, file_name, current_state)
 
-    if 'error' in state:
+    if 'error' in state and state['error'] is not None:
+        logger.error(f"File processing error: {state['error']}")
         return state
 
-    # Make sure we're in the right state to process a CV
-    state['waiting_for_cv'] = True
+    # Ensure we actually have text extracted from the CV
+    if not state.get('user_input'):
+        logger.error("No text extracted from CV file")
+        return {'error': "No text could be extracted from the CV file"}
 
-    # Invoke the graph
-    logger.info("Invoking graph with extracted CV text")
-    config = {"configurable": {"thread_id": "file-upload-thread"}}
-    try:
-        result = await graph.ainvoke(state, config=config)
-        logger.info("Graph invocation successful")
-        return result
-    except Exception as e:
-        logger.error(f"Error invoking graph: {str(e)}")
-        return {'error': str(e)}
+    # Set up the state to continue with the normal job search flow
+    # Instead of trying to invoke the graph directly
+    logger.info(f"Successfully processed CV with {len(state.get('user_input', ''))} characters")
+    return state

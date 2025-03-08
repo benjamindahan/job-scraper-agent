@@ -98,18 +98,60 @@ llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
 # NODE FUNCTIONS WITH EXTENSIVE LOGGING
 
 async def search_jobs_node(state: JobScraperState) -> Dict[str, Any]:
+    """
+    Node to search for jobs based on the job title.
+
+    This node will:
+    1. Check if jobs are already in the state
+    2. Check if jobs are in the database
+    3. Only scrape if necessary
+    """
+    from src.tools.database import get_jobs_by_title, store_jobs
+
     log("Entered search_jobs_node with state keys: " + ", ".join(state.keys()))
     job_title = state["job_title"]
     max_jobs = state.get("max_jobs", 20)
+
+    # Check if we already have jobs in the state
+    if state.get("jobs_data") and len(state.get("jobs_data", [])) > 0:
+        log(f"Already have {len(state['jobs_data'])} jobs in state, skipping search")
+        return state
+
+    # Check if we have jobs in the database
+    db_jobs = get_jobs_by_title(job_title, max_jobs)
+
+    if db_jobs and len(db_jobs) > 0:
+        log(f"Found {len(db_jobs)} jobs in database for '{job_title}'")
+        state["jobs_data"] = db_jobs
+        state["job_urls"] = [job.get("url", "") for job in db_jobs]
+        log("Exiting search_jobs_node with state keys: " + ", ".join(
+            state.keys()))
+        return state
+
+    # If no jobs in database, scrape them
     log(f"Searching for '{job_title}' jobs (max: {max_jobs})...")
 
     try:
+        from src.tools.scraping import scrape_jobs
         jobs = await scrape_jobs(job_title, max_jobs)
+
+        if not jobs or len(jobs) == 0:
+            log("No jobs found through scraping. Checking database as fallback")
+            # Final fallback: get any jobs we have
+            jobs = get_jobs_by_title("", max_jobs)  # Get any job
+
+            if not jobs:
+                log("No jobs found in database either. Returning empty state")
+                state[
+                    "error"] = "No jobs found. Please try a different search term or try again later."
+                return state
+
         log(f"Scraped {len(jobs)} jobs")
         store_jobs(jobs)
         state["jobs_data"] = jobs
         state["job_urls"] = [job.get("url", "") for job in jobs]
-        log("Exiting search_jobs_node with state keys: " + ", ".join(state.keys()))
+        log("Exiting search_jobs_node with state keys: " + ", ".join(
+            state.keys()))
         return state
     except Exception as e:
         error_msg = f"Error searching for jobs: {str(e)}"
@@ -126,8 +168,10 @@ def prepare_user_preference_prompt(state: JobScraperState) -> Dict[str, Any]:
     log("Exiting prepare_user_preferences with state keys: " + ", ".join(state.keys()))
     return state
 
+
 def collect_user_preferences(state: JobScraperState) -> Dict[str, Any]:
-    log("Entered collect_user_preferences with state keys: " + ", ".join(state.keys()))
+    log("Entered collect_user_preferences with state keys: " + ", ".join(
+        state.keys()))
     if not state.get("waiting_for_preferences"):
         log("Not waiting for preferences; exiting collect_user_preferences.")
         return state
@@ -141,78 +185,163 @@ def collect_user_preferences(state: JobScraperState) -> Dict[str, Any]:
     try:
         locations = state.get("available_locations", [])
         location_str = ", ".join(locations)
+
         prompt = ChatPromptTemplate.from_messages([
             SystemMessage(content=f"""
-            You are an assistant helping parse job preferences. Extract the following information:
-            1. Years of experience (as an integer)
-            2. Date range preference (one of: "Anytime", "Last 24 hours", "Last Week", "Last Month")
-            3. Preferred locations from this list: {location_str}
-            
-            Format your response as a valid JSON object with fields: 
-            - experience (int)
-            - date_range (string)
-            - locations (array of strings)
+            You are an assistant helping parse job preferences. Extract the following information from the user input:
+
+            1. Experience level:
+               - If the user mentions specific years (e.g., "6 years"), extract this as a number
+               - If the user mentions "entry level" or "junior", set this to 0
+               - If the user mentions "mid-level", set this to 2
+               - If the user mentions "senior", set this to 5
+               - Default to 0 if unclear
+
+            2. Date range preference:
+               - Map to one of these values: "Anytime", "Last 24 hours", "Last Week", "Last Month"
+               - Use "Anytime" as default
+               - If the user mentions "2 weeks" or similar, map to the closest option
+
+            3. Preferred locations:
+               - If the user specifies locations, find the best matches from this list: {location_str}
+               - Use fuzzy matching for locations (e.g., "Tel Aviv" should match "Tel Aviv/Ramat Gan")
+               - If the user says "any", "anywhere", or expresses no location preference, return an empty array
+
+            Format your response as a valid JSON object with these fields:
+            - experience (int): years of experience (0 for entry level)
+            - date_range (string): one of the four values listed above
+            - locations (array of strings): matched locations from the provided list or empty array for no preference
             """),
             HumanMessage(content=user_input)
         ])
+
         response = llm.invoke(prompt.format_messages())
         log("LLM response for preferences: " + response.content)
+
         json_match = re.search(r'```json\s*([\s\S]*?)\s*```', response.content)
         json_str = json_match.group(1) if json_match else response.content
         json_str = re.sub(r'^[^{]*', '', json_str)
         json_str = re.sub(r'[^}]*$', '', json_str)
+
         preferences = json.loads(json_str)
-        if "experience" not in preferences or not isinstance(preferences["experience"], int):
+
+        # Validate experience (ensure it's an integer)
+        if "experience" not in preferences or not isinstance(
+                preferences["experience"], int):
             preferences["experience"] = 0
+
+        # Validate date_range
         if "date_range" not in preferences:
             preferences["date_range"] = "Anytime"
-        elif preferences["date_range"] not in ["Anytime", "Last 24 hours", "Last Week", "Last Month"]:
+        elif preferences["date_range"] not in ["Anytime", "Last 24 hours",
+                                               "Last Week", "Last Month"]:
             preferences["date_range"] = "Anytime"
-        if "locations" not in preferences or not isinstance(preferences["locations"], list):
-            preferences["locations"] = locations[:3] if locations else []
+
+        # Validate and perform fuzzy location matching
+        if "locations" not in preferences or not isinstance(
+                preferences["locations"], list):
+            # Default to no location filter if no valid locations
+            preferences["locations"] = []
         else:
-            valid_locations = [loc for loc in preferences["locations"] if loc in locations]
-            preferences["locations"] = valid_locations if valid_locations else (locations[:3] if locations else [])
+            # Fuzzy match locations
+            matched_locations = []
+            for user_loc in preferences["locations"]:
+                user_loc_lower = user_loc.lower()
+                for db_loc in locations:
+                    if user_loc_lower in db_loc.lower() or db_loc.lower() in user_loc_lower:
+                        matched_locations.append(db_loc)
+                        break
+
+            # If we found matches, use them; otherwise keep empty for no filtering
+            if matched_locations:
+                preferences["locations"] = matched_locations
+
         log(f"Parsed preferences: {preferences}")
         state["user_preferences"] = preferences
         state["waiting_for_preferences"] = False
-        log("Exiting collect_user_preferences with state keys: " + ", ".join(state.keys()))
+        log("Exiting collect_user_preferences with state keys: " + ", ".join(
+            state.keys()))
         return state
+
     except Exception as e:
         log(f"Error parsing preferences: {e}")
         state["user_preferences"] = {
             "experience": 0,
             "date_range": "Anytime",
-            "locations": state.get("available_locations", [])[:3]
+            "locations": []  # Default to no location filter on error
         }
         state["waiting_for_preferences"] = False
         return state
 
+
 def filter_jobs_node(state: JobScraperState) -> Dict[str, Any]:
+    """
+    Node to filter jobs based on user preferences.
+    """
+    from src.tools.database import filter_jobs, get_all_jobs
+
     log("Entered filter_jobs_node with state keys: " + ", ".join(state.keys()))
+
+    # Get user preferences or use defaults
     prefs = state.get("user_preferences") or {
         "experience": 0,
         "date_range": "Anytime",
-        "locations": state.get("available_locations", [])[:3]
+        "locations": []  # Default to no location filtering
     }
+
     log(f"Filtering jobs with preferences: {prefs}")
+
     try:
+        # Handle the case where we have no jobs data from scraping
+        if not state.get("jobs_data"):
+            log("No jobs data available for filtering")
+            state["filtered_jobs"] = []
+            state["waiting_for_cv"] = True
+            return state
+
+        # First try with exact preferences
         filtered = filter_jobs(
             min_experience=prefs.get("experience", 0),
             locations=prefs.get("locations", []),
             date_range=prefs.get("date_range", "Anytime")
         )
+
+        # If no results with strict filtering, try more flexible approaches
+        if len(filtered) == 0:
+            log("No jobs matched strict criteria, trying with only experience filter")
+
+            filtered = filter_jobs(
+                min_experience=prefs.get("experience", 0),
+                locations=[],  # No location filter
+                date_range="Anytime"  # No date filter
+            )
+
+            # If still no results and we have locations, try with just location
+            if len(filtered) == 0 and prefs.get("locations"):
+                log("No jobs matched experience filter, trying with only location filter")
+
+                filtered = filter_jobs(
+                    min_experience=0,  # No experience filter
+                    locations=prefs.get("locations", []),
+                    date_range="Anytime"  # No date filter
+                )
+
+            # If still no results, return all jobs
+            if len(filtered) == 0:
+                log("No jobs matched any filter criteria, returning all jobs")
+                filtered = get_all_jobs()  # Get all jobs from the database
+
         log(f"Filtered to {len(filtered)} matching jobs")
         state["filtered_jobs"] = filtered
-        state["waiting_for_cv"] = True
-        log("Exiting filter_jobs_node with state keys: " + ", ".join(state.keys()))
+        state["waiting_for_cv"] = True  # Set to wait for CV if needed
+        log("Exiting filter_jobs_node with state keys: " + ", ".join(
+            state.keys()))
         return state
     except Exception as e:
         error_msg = f"Error filtering jobs: {str(e)}"
         log(error_msg)
         state["error"] = error_msg
         return state
-
 
 def collect_cv(state: JobScraperState) -> Dict[str, Any]:
     log("Entered collect_cv with state keys: " + ", ".join(state.keys()))
@@ -303,95 +432,125 @@ def collect_cv(state: JobScraperState) -> Dict[str, Any]:
         state["waiting_for_cv"] = False
         return state
 
+
 def rank_jobs_with_llm(state: JobScraperState) -> Dict[str, Any]:
-    log("Entered rank_jobs_with_llm with state keys: " + ", ".join(state.keys()))
+    log("Entered rank_jobs_with_llm with state keys: " + ", ".join(
+        state.keys()))
+
+    # Get filtered jobs or fall back to all jobs if filtering returned nothing
     filtered_jobs = state.get("filtered_jobs", [])
+    if not filtered_jobs and state.get("jobs_data"):
+        log("No filtered jobs available, using all jobs")
+        filtered_jobs = state.get("jobs_data", [])
+
     cv_data = state.get("cv_data", {})
     cv_text = state.get("cv_text", "")
+
     log(f"Ranking {len(filtered_jobs)} jobs using LLM...")
+
+    # If no CV provided, return jobs without ranking
     if not cv_text:
         log("No CV provided, returning unranked jobs")
         state["ranked_jobs"] = filtered_jobs
         state["waiting_for_job_selection"] = True
-        log("Exiting rank_jobs_with_llm with state keys: " + ", ".join(state.keys()))
+        log("Exiting rank_jobs_with_llm with state keys: " + ", ".join(
+            state.keys()))
         return state
 
-    ranked_jobs = []
-    batch_size = 3
-    for i in range(0, len(filtered_jobs), batch_size):
-        batch = filtered_jobs[i:i+batch_size]
-        jobs_text = ""
-        for idx, job in enumerate(batch):
-            jobs_text += f"\nJob {idx+1}:\n"
-            jobs_text += f"Title: {job.get('job_title', 'Unknown')}\n"
-            jobs_text += f"Company: {job.get('company_name', 'Unknown')}\n"
-            jobs_text += f"Description: {job.get('description', 'No description')[:500]}...\n"
-            jobs_text += f"Experience Required: {job.get('experience_years', 0)} years\n"
-            jobs_text += f"Location: {job.get('location', 'Unknown')}\n"
-            jobs_text += f"Education: {job.get('education_level', 'Unknown')}\n"
-            jobs_text += "---\n"
-        cv_skills = ", ".join(cv_data.get("skills", []))
-        cv_exp = cv_data.get("experience_years", 0)
-        cv_education = cv_data.get("education", "Unknown")
-        cv_titles = ", ".join(cv_data.get("job_titles", []))
-        prompt = ChatPromptTemplate.from_messages([
-            SystemMessage(content=f"""
-            You are a job matching expert. Assess how well each job matches the candidate's profile.
-            
-            Candidate Profile:
-            - Skills: {cv_skills}
-            - Experience: {cv_exp} years
-            - Education: {cv_education}
-            - Previous Titles: {cv_titles}
-            
-            For each job, provide:
-            1. A relevance score (0-100)
-            2. A brief explanation of the score
-            
-            Format your response as a valid JSON array of objects, each with:
-            - job_index (integer): the job number (1, 2, 3, etc.)
-            - score (integer): 0-100 relevance score
-            - explanation (string): brief explanation
-            Example:
-            ```json
-            [
-              {{
-                "job_index": 1,
-                "score": 85,
-                "explanation": "Strong match for technical skills and experience"
-              }}
-            ]
-            ```
-            """),
-            HumanMessage(content=f"Here are the jobs to evaluate: {jobs_text}")
-        ])
-        try:
-            response = llm.invoke(prompt.format_messages())
-            #log("LLM response for ranking: " + response.content)
-            json_match = re.search(r'```json\s*([\s\S]*?)\s*```', response.content)
-            json_str = json_match.group(1) if json_match else response.content
-            json_str = re.sub(r'^[^[]*', '', json_str)
-            json_str = re.sub(r'[^]]*$', '', json_str)
-            rankings = json.loads(json_str)
-            for ranking in rankings:
-                job_idx = ranking.get("job_index", 0) - 1
-                if 0 <= job_idx < len(batch):
-                    job_copy = batch[job_idx].copy()
-                    job_copy["relevance_score"] = ranking.get("score", 0)
-                    job_copy["relevance_explanation"] = ranking.get("explanation", "")
+    # Proceed with ranking if we have jobs and CV
+    if filtered_jobs:
+        ranked_jobs = []
+        batch_size = 3
+        for i in range(0, len(filtered_jobs), batch_size):
+            batch = filtered_jobs[i:i + batch_size]
+            jobs_text = ""
+            for idx, job in enumerate(batch):
+                jobs_text += f"\nJob {idx + 1}:\n"
+                jobs_text += f"Title: {job.get('job_title', 'Unknown')}\n"
+                jobs_text += f"Company: {job.get('company_name', 'Unknown')}\n"
+                jobs_text += f"Description: {job.get('description', 'No description')[:500]}...\n"
+                jobs_text += f"Experience Required: {job.get('experience_text', str(job.get('experience_years', 0)) + ' years')}\n"
+                jobs_text += f"Location: {job.get('location', 'Unknown')}\n"
+                jobs_text += f"Education: {job.get('education_level', 'Unknown')}\n"
+                jobs_text += "---\n"
+
+            cv_skills = ", ".join(cv_data.get("skills", []))
+            cv_exp = cv_data.get("experience_years", 0)
+            cv_education = cv_data.get("education", "Unknown")
+            cv_titles = ", ".join(cv_data.get("job_titles", []))
+
+            prompt = ChatPromptTemplate.from_messages([
+                SystemMessage(content=f"""
+                You are a job matching expert. Assess how well each job matches the candidate's profile.
+
+                Candidate Profile:
+                - Skills: {cv_skills}
+                - Experience: {cv_exp} years
+                - Education: {cv_education}
+                - Previous Titles: {cv_titles}
+
+                For each job, provide:
+                1. A relevance score (0-100)
+                2. A brief explanation of the score
+
+                Format your response as a valid JSON array of objects, each with:
+                - job_index (integer): the job number (1, 2, 3, etc.)
+                - score (integer): 0-100 relevance score
+                - explanation (string): brief explanation
+                Example:
+                ```json
+                [
+                  {{
+                    "job_index": 1,
+                    "score": 85,
+                    "explanation": "Strong match for technical skills and experience"
+                  }}
+                ]
+                ```
+                """),
+                HumanMessage(
+                    content=f"Here are the jobs to evaluate: {jobs_text}")
+            ])
+
+            try:
+                response = llm.invoke(prompt.format_messages())
+                json_match = re.search(r'```json\s*([\s\S]*?)\s*```',
+                                       response.content)
+                json_str = json_match.group(
+                    1) if json_match else response.content
+                json_str = re.sub(r'^[^[]*', '', json_str)
+                json_str = re.sub(r'[^]]*$', '', json_str)
+                rankings = json.loads(json_str)
+
+                for ranking in rankings:
+                    job_idx = ranking.get("job_index", 0) - 1
+                    if 0 <= job_idx < len(batch):
+                        job_copy = batch[job_idx].copy()
+                        job_copy["relevance_score"] = ranking.get("score", 0)
+                        job_copy["relevance_explanation"] = ranking.get(
+                            "explanation", "")
+                        ranked_jobs.append(job_copy)
+
+            except Exception as e:
+                log(f"Error ranking batch: {e}")
+                for job in batch:
+                    job_copy = job.copy()
+                    job_copy["relevance_score"] = 0
+                    job_copy["relevance_explanation"] = "Error in ranking"
                     ranked_jobs.append(job_copy)
-        except Exception as e:
-            log(f"Error ranking batch: {e}")
-            for job in batch:
-                job_copy = job.copy()
-                job_copy["relevance_score"] = 0
-                job_copy["relevance_explanation"] = "Error in ranking"
-                ranked_jobs.append(job_copy)
-    ranked_jobs.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
-    log(f"Ranked {len(ranked_jobs)} jobs")
-    state["ranked_jobs"] = ranked_jobs
+
+        # Sort by relevance score (highest first)
+        ranked_jobs.sort(key=lambda x: x.get("relevance_score", 0),
+                         reverse=True)
+        log(f"Ranked {len(ranked_jobs)} jobs")
+        state["ranked_jobs"] = ranked_jobs
+    else:
+        log("No jobs to rank")
+        state["ranked_jobs"] = []
+
     state["waiting_for_job_selection"] = True
-    log("Exiting rank_jobs_with_llm with state keys: " + ", ".join(state.keys()))
+    log("Exiting rank_jobs_with_llm with state keys: " + ", ".join(
+        state.keys()))
     return state
 
 def prepare_job_selection(state: JobScraperState) -> Dict[str, Any]:
@@ -404,62 +563,85 @@ def prepare_job_selection(state: JobScraperState) -> Dict[str, Any]:
     log("Exiting prepare_job_selection with state keys: " + ", ".join(state.keys()))
     return state
 
+
 def collect_job_selection(state: JobScraperState) -> Dict[str, Any]:
-    log("Entered collect_job_selection with state keys: " + ", ".join(state.keys()))
+    log("Entered collect_job_selection with state keys: " + ", ".join(
+        state.keys()))
+
     if not state.get("waiting_for_job_selection"):
         log("Not waiting for job selection; exiting collect_job_selection.")
         return state
+
     user_input = state.get("user_input", "")
     if not user_input:
         log("No user input for job selection; exiting collect_job_selection.")
         return state
+
     ranked_jobs = state.get("ranked_jobs", [])
     if not ranked_jobs:
         state["selected_jobs"] = []
+        state["waiting_for_job_selection"] = False
         return state
+
     log(f"Processing job selection: {user_input}")
+
     try:
-        job_titles = [f"{i+1}. {job.get('job_title', '')} at {job.get('company_name', '')}"
-                     for i, job in enumerate(ranked_jobs[:10])]
+        job_titles = [
+            f"{i + 1}. {job.get('job_title', '')} at {job.get('company_name', '')}"
+            for i, job in enumerate(ranked_jobs[:10])]
         job_titles_str = "\n".join(job_titles)
+
         prompt = ChatPromptTemplate.from_messages([
             SystemMessage(content=f"""
             Parse the user's job selection from the following list:
             {job_titles_str}
-            
+
             The user may specify jobs by number, title, or company.
             Return a JSON array containing only the job numbers (1-based indexing).
             For example: [1, 3, 5]
+
+            If the user's input doesn't clearly match any jobs, select the top job (job #1).
             """),
             HumanMessage(content=user_input)
         ])
+
         response = llm.invoke(prompt.format_messages())
         log("LLM response for job selection: " + response.content)
+
         json_match = re.search(r'```json\s*([\s\S]*?)\s*```', response.content)
         json_str = json_match.group(1) if json_match else response.content
         json_str = re.sub(r'^[^[]*', '', json_str)
         json_str = re.sub(r'[^]]*$', '', json_str)
+
         selections = json.loads(json_str)
         selected_jobs = []
+
         for idx in selections:
             if isinstance(idx, int) and 1 <= idx <= len(ranked_jobs):
-                job = ranked_jobs[idx-1]
+                job = ranked_jobs[idx - 1]
                 selected_jobs.append(job.get("url", ""))
+
+        # If no valid selections, default to the top job
         if not selected_jobs and len(ranked_jobs) > 0:
             selected_jobs = [ranked_jobs[0].get("url", "")]
+
         state["selected_jobs"] = selected_jobs
         state["waiting_for_job_selection"] = False
+
         log(f"Selected {len(selected_jobs)} jobs: {selected_jobs}")
-        log("Exiting collect_job_selection with state keys: " + ", ".join(state.keys()))
+        log("Exiting collect_job_selection with state keys: " + ", ".join(
+            state.keys()))
         return state
+
     except Exception as e:
         log(f"Error parsing job selection: {e}")
+        # Default to top job on error
         if ranked_jobs:
             state["selected_jobs"] = [ranked_jobs[0].get("url", "")]
-            state["waiting_for_job_selection"] = False
         else:
             state["selected_jobs"] = []
-            state["waiting_for_job_selection"] = False
+
+        state["waiting_for_job_selection"] = False
         return state
 
 def optimize_cvs(state: JobScraperState) -> Dict[str, Any]:
@@ -548,6 +730,8 @@ def initial_state_creator() -> JobScraperState:
         "cv_text": None,
         "cv_data": None,
         "waiting_for_cv": None,
+        "cv_file_path": None,  # Path to the uploaded CV file
+        "cv_file_name": None,  # Name of the uploaded CV file
         "waiting_for_job_selection": None,
         "selected_jobs": None,
         "optimized_cvs": None,
@@ -556,28 +740,57 @@ def initial_state_creator() -> JobScraperState:
     log("Initial state created with keys: " + ", ".join(state.keys()))
     return state
 
+
 def should_wait_for_preferences(state: JobScraperState) -> str:
-    log("Evaluating should_wait_for_preferences with state keys: " + ", ".join(state.keys()))
-    if state.get("waiting_for_preferences", False):
-        if state.get("user_input") is not None:
-            return "collect_user_preferences"
+    log("Evaluating should_wait_for_preferences with state keys: " + ", ".join(
+        state.keys()))
+
+    # If we're explicitly waiting for preferences and have user input
+    if state.get("waiting_for_preferences", False) and state.get(
+            "user_input") is not None:
+        return "collect_user_preferences"
+
+    # If we already have preferences, skip to filtering
+    if state.get("user_preferences") is not None:
         return "filter_jobs"
+
+    # Default: proceed to filtering with default preferences
     return "filter_jobs"
 
+
 def should_wait_for_cv(state: JobScraperState) -> str:
-    log("Evaluating should_wait_for_cv with state keys: " + ", ".join(state.keys()))
-    if state.get("waiting_for_cv", False):
-        if state.get("user_input") is not None:
-            return "collect_cv"
+    log("Evaluating should_wait_for_cv with state keys: " + ", ".join(
+        state.keys()))
+
+    # If we've explicitly been told to wait for CV and have user input (CV content)
+    if state.get("waiting_for_cv", False) and state.get(
+            "user_input") is not None:
+        return "collect_cv"
+
+    # If we already have CV data or we don't need to wait for CV
+    if state.get("cv_data") is not None or not state.get("waiting_for_cv",
+                                                         False):
         return "rank_jobs"
+
+    # Default: proceed to ranking (possibly without CV)
     return "rank_jobs"
 
+
 def should_wait_for_job_selection(state: JobScraperState) -> str:
-    log("Evaluating should_wait_for_job_selection with state keys: " + ", ".join(state.keys()))
-    if state.get("waiting_for_job_selection", False):
-        if state.get("user_input") is not None:
-            return "collect_job_selection"
+    log("Evaluating should_wait_for_job_selection with state keys: " + ", ".join(
+        state.keys()))
+
+    # If we're waiting for job selection and have user input
+    if state.get("waiting_for_job_selection", False) and state.get(
+            "user_input") is not None:
+        return "collect_job_selection"
+
+    # If we're not waiting or already have selected jobs
+    if not state.get("waiting_for_job_selection", False) or state.get(
+            "selected_jobs") is not None:
         return "optimize_cvs"
+
+    # Default: proceed to optimization (might be without any selected jobs)
     return "optimize_cvs"
 
 # Build the graph
