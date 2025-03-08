@@ -2,14 +2,81 @@
 """
 Interactive CLI for the Job Application Assistant.
 """
-
+import argparse
 import asyncio
 import sys
 import os
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from src.graph import graph, initial_state_creator
+from src.cv_upload import process_cv_file_and_invoke_graph
 
+
+async def run_agent(job_title: str, max_jobs: int = 20,
+                    cv_file_path: Optional[str] = None):
+    """
+    Run the job scraper agent with the specified parameters.
+
+    Args:
+        job_title: Job title to search for
+        max_jobs: Maximum number of jobs to scrape
+        cv_file_path: Path to the CV file (optional)
+    """
+    print(f"Starting job search for '{job_title}'...")
+
+    # Initial state
+    state = initial_state_creator()
+    state["job_title"] = job_title
+    state["max_jobs"] = max_jobs
+
+    # If a CV file is provided, process it first
+    if cv_file_path:
+        if not os.path.exists(cv_file_path):
+            print(f"Error: CV file not found at {cv_file_path}")
+            return
+
+        print(f"Processing CV file: {cv_file_path}")
+        state = await process_cv_file_and_invoke_graph(file_path=cv_file_path,
+                                                       current_state=state)
+
+        if 'error' in state:
+            print(f"Error processing CV file: {state['error']}")
+            return
+    else:
+        # No CV file, invoke the graph normally
+        config = {"configurable": {"thread_id": "cli-thread"}}
+        state = await graph.ainvoke(state, config=config)
+
+    # Print results
+    print("\n=== Results ===")
+    if state.get("error"):
+        print(f"Error encountered: {state['error']}")
+        return
+
+    if state.get("jobs_data"):
+        print(f"Found and processed {len(state['jobs_data'])} jobs")
+
+    if state.get("filtered_jobs"):
+        print(f"Filtered to {len(state['filtered_jobs'])} matching jobs")
+
+    if state.get("ranked_jobs"):
+        print(f"Ranked {len(state['ranked_jobs'])} jobs by relevance")
+        print("\nTop ranked jobs:")
+        for i, job in enumerate(state['ranked_jobs'][:3], 1):
+            print(
+                f"{i}. {job.get('job_title', 'Unknown')} at {job.get('company_name', 'Unknown')}")
+            if 'relevance_score' in job:
+                print(f"   Score: {job['relevance_score']}")
+                print(f"   Reason: {job.get('relevance_explanation', '')}")
+
+    if state.get("selected_jobs"):
+        print(
+            f"\nSelected {len(state['selected_jobs'])} jobs for CV optimization")
+
+    if state.get("optimized_cvs"):
+        print("\nOptimized CVs:")
+        for job_key in state["optimized_cvs"]:
+            print(f"- {job_key}")
 
 async def run_interactive_session():
     """Run an interactive session with the job application assistant."""
@@ -219,12 +286,20 @@ def print_final_results(state: Dict[str, Any]) -> None:
     print("\nThank you for using the Job Application Assistant!")
 
 
-if __name__ == "__main__":
-    # Handle Windows event loop policy
+def main():
+    parser = argparse.ArgumentParser(description="Job Scraper Agent CLI")
+    parser.add_argument("job_title", help="Job title to search for")
+    parser.add_argument("--max-jobs", type=int, default=20,
+                        help="Maximum number of jobs to scrape")
+    parser.add_argument("--cv", help="Path to the CV file (PDF, DOCX, or TXT)")
+
+    args = parser.parse_args()
+
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-    try:
-        asyncio.run(run_interactive_session())
-    except KeyboardInterrupt:
-        print("\nSession terminated by user.")
+    asyncio.run(run_agent(args.job_title, args.max_jobs, args.cv))
+
+
+if __name__ == "__main__":
+    main()
