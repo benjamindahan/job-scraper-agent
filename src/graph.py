@@ -56,6 +56,8 @@ class JobScraperState(TypedDict):
     job_title: str
     max_jobs: int
     user_input: Optional[str]  # For user interaction
+    preference_input: Optional[str]  # Specifically for preference collection
+    job_selection_input: Optional[str]  # Specifically for job selection
 
     # Scraping results
     job_urls: Optional[List[str]]
@@ -76,6 +78,7 @@ class JobScraperState(TypedDict):
     waiting_for_cv: Optional[bool]
     cv_file_path: Optional[str]  # Path to the uploaded CV file
     cv_file_name: Optional[str]  # Name of the uploaded CV file
+    cv_processed: Optional[bool]  # Flag to track if CV has been processed
 
     # Job selection
     waiting_for_job_selection: Optional[bool]
@@ -176,7 +179,8 @@ def collect_user_preferences(state: JobScraperState) -> Dict[str, Any]:
         log("Not waiting for preferences; exiting collect_user_preferences.")
         return state
 
-    user_input = state.get("user_input", "")
+    # Use dedicated preference_input field if available, otherwise fall back to user_input
+    user_input = state.get("preference_input") or state.get("user_input", "")
     if not user_input:
         log("No user input for preferences; exiting collect_user_preferences.")
         return state
@@ -259,6 +263,11 @@ def collect_user_preferences(state: JobScraperState) -> Dict[str, Any]:
         log(f"Parsed preferences: {preferences}")
         state["user_preferences"] = preferences
         state["waiting_for_preferences"] = False
+
+        # Clear input fields after use
+        state["preference_input"] = None
+        state["user_input"] = None
+
         log("Exiting collect_user_preferences with state keys: " + ", ".join(
             state.keys()))
         return state
@@ -271,6 +280,11 @@ def collect_user_preferences(state: JobScraperState) -> Dict[str, Any]:
             "locations": []  # Default to no location filter on error
         }
         state["waiting_for_preferences"] = False
+
+        # Clear input fields after use
+        state["preference_input"] = None
+        state["user_input"] = None
+
         return state
 
 
@@ -343,10 +357,13 @@ def filter_jobs_node(state: JobScraperState) -> Dict[str, Any]:
         state["error"] = error_msg
         return state
 
+
 def collect_cv(state: JobScraperState) -> Dict[str, Any]:
     log("Entered collect_cv with state keys: " + ", ".join(state.keys()))
-    if not state.get("waiting_for_cv"):
-        log("Not waiting for CV; exiting collect_cv.")
+
+    # Skip if CV has already been processed
+    if state.get("cv_processed") or not state.get("waiting_for_cv"):
+        log("CV already processed or not waiting for CV; exiting collect_cv.")
         return state
 
     # Check for CV file path or user input
@@ -417,6 +434,12 @@ def collect_cv(state: JobScraperState) -> Dict[str, Any]:
         state["cv_text"] = cv_text
         state["cv_data"] = cv_data
         state["waiting_for_cv"] = False
+        state[
+            "cv_processed"] = True  # Mark CV as processed to avoid duplication
+
+        # Clear user_input after use
+        state["user_input"] = None
+
         log("Exiting collect_cv with state keys: " + ", ".join(state.keys()))
         return state
     except Exception as e:
@@ -430,6 +453,12 @@ def collect_cv(state: JobScraperState) -> Dict[str, Any]:
             "industries": []
         }
         state["waiting_for_cv"] = False
+        state[
+            "cv_processed"] = True  # Mark as processed even if there was an error
+
+        # Clear user_input after use
+        state["user_input"] = None
+
         return state
 
 
@@ -457,10 +486,44 @@ def rank_jobs_with_llm(state: JobScraperState) -> Dict[str, Any]:
             state.keys()))
         return state
 
+    # NEW: Smart re-use of existing rankings
+    # If we already have ranked jobs and just filtered the existing set
+    if state.get("ranked_jobs") and filtered_jobs:
+        # Extract the URLs of filtered jobs
+        filtered_urls = {job.get("url", ""): job for job in filtered_jobs}
+
+        # Check if the filtered jobs are already in our ranked list
+        existing_ranked_jobs = []
+        for job in state.get("ranked_jobs", []):
+            job_url = job.get("url", "")
+            if job_url in filtered_urls:
+                # Use the filtered job data but keep the ranking score and explanation
+                ranked_job = filtered_urls[job_url].copy()
+                ranked_job["relevance_score"] = job.get("relevance_score", 0)
+                ranked_job["relevance_explanation"] = job.get(
+                    "relevance_explanation", "")
+                existing_ranked_jobs.append(ranked_job)
+
+        # If we found rankings for all filtered jobs, reuse them
+        if len(existing_ranked_jobs) == len(filtered_jobs):
+            log(f"Reusing existing rankings for all {len(filtered_jobs)} filtered jobs")
+            # Sort by relevance score (highest first)
+            existing_ranked_jobs.sort(
+                key=lambda x: x.get("relevance_score", 0), reverse=True)
+            state["ranked_jobs"] = existing_ranked_jobs
+            state["waiting_for_job_selection"] = True
+            log("Exiting rank_jobs_with_llm with state keys: " + ", ".join(
+                state.keys()))
+            return state
+        # If we found some but not all rankings, continue with normal ranking
+        elif existing_ranked_jobs:
+            log(f"Found rankings for {len(existing_ranked_jobs)} out of {len(filtered_jobs)} jobs, performing full ranking")
+
     # Proceed with ranking if we have jobs and CV
     if filtered_jobs:
         ranked_jobs = []
-        batch_size = 3
+        # UPDATED: Increase batch size from 3 to 5 for efficiency
+        batch_size = 5
         for i in range(0, len(filtered_jobs), batch_size):
             batch = filtered_jobs[i:i + batch_size]
             jobs_text = ""
@@ -572,7 +635,9 @@ def collect_job_selection(state: JobScraperState) -> Dict[str, Any]:
         log("Not waiting for job selection; exiting collect_job_selection.")
         return state
 
-    user_input = state.get("user_input", "")
+    # Use dedicated job_selection_input field if available, otherwise fall back to user_input
+    user_input = state.get("job_selection_input") or state.get("user_input",
+                                                               "")
     if not user_input:
         log("No user input for job selection; exiting collect_job_selection.")
         return state
@@ -593,14 +658,21 @@ def collect_job_selection(state: JobScraperState) -> Dict[str, Any]:
 
         prompt = ChatPromptTemplate.from_messages([
             SystemMessage(content=f"""
-            Parse the user's job selection from the following list:
+            You are analyzing a user's job selection from a numbered list. The user has likely provided 
+            job numbers or descriptions from this list:
             {job_titles_str}
 
-            The user may specify jobs by number, title, or company.
-            Return a JSON array containing only the job numbers (1-based indexing).
-            For example: [1, 3, 5]
+            YOUR TASK:
+            1. Identify which jobs the user wants to select based on their input
+            2. Return ONLY a JSON array containing the job numbers (1-based indexing)
+            3. For example, if they select jobs 1 and 3, return: [1, 3]
 
-            If the user's input doesn't clearly match any jobs, select the top job (job #1).
+            IMPORTANT INSTRUCTIONS:
+            - Return ONLY the JSON array, nothing else - no explanations, no questions
+            - Do not include backticks or "json" in your response
+            - If the input is ambiguous, select the first job (job #1)
+            - Only include valid job numbers from 1 to {len(ranked_jobs[:10])}
+            - If the user mentions anything other than job selection, still return a valid JSON array with at least one job
             """),
             HumanMessage(content=user_input)
         ])
@@ -608,12 +680,15 @@ def collect_job_selection(state: JobScraperState) -> Dict[str, Any]:
         response = llm.invoke(prompt.format_messages())
         log("LLM response for job selection: " + response.content)
 
-        json_match = re.search(r'```json\s*([\s\S]*?)\s*```', response.content)
-        json_str = json_match.group(1) if json_match else response.content
-        json_str = re.sub(r'^[^[]*', '', json_str)
-        json_str = re.sub(r'[^]]*$', '', json_str)
+        # Clean the response to ensure it's valid JSON
+        clean_response = response.content.strip()
+        # Remove any backticks, json tags, or explanations
+        clean_response = re.sub(r'```json\s*', '', clean_response)
+        clean_response = re.sub(r'```', '', clean_response)
+        clean_response = re.sub(r'^[^[]*', '', clean_response)
+        clean_response = re.sub(r'[^]]*$', '', clean_response)
 
-        selections = json.loads(json_str)
+        selections = json.loads(clean_response)
         selected_jobs = []
 
         for idx in selections:
@@ -627,6 +702,10 @@ def collect_job_selection(state: JobScraperState) -> Dict[str, Any]:
 
         state["selected_jobs"] = selected_jobs
         state["waiting_for_job_selection"] = False
+
+        # Clear input fields after use
+        state["job_selection_input"] = None
+        state["user_input"] = None
 
         log(f"Selected {len(selected_jobs)} jobs: {selected_jobs}")
         log("Exiting collect_job_selection with state keys: " + ", ".join(
@@ -642,6 +721,11 @@ def collect_job_selection(state: JobScraperState) -> Dict[str, Any]:
             state["selected_jobs"] = []
 
         state["waiting_for_job_selection"] = False
+
+        # Clear input fields after use
+        state["job_selection_input"] = None
+        state["user_input"] = None
+
         return state
 
 def optimize_cvs(state: JobScraperState) -> Dict[str, Any]:
@@ -720,6 +804,8 @@ def initial_state_creator() -> JobScraperState:
         "job_title": "",
         "max_jobs": 20,
         "user_input": None,
+        "preference_input": None,
+        "job_selection_input": None,
         "job_urls": None,
         "jobs_data": None,
         "user_preferences": None,
@@ -730,8 +816,9 @@ def initial_state_creator() -> JobScraperState:
         "cv_text": None,
         "cv_data": None,
         "waiting_for_cv": None,
-        "cv_file_path": None,  # Path to the uploaded CV file
-        "cv_file_name": None,  # Name of the uploaded CV file
+        "cv_file_path": None,
+        "cv_file_name": None,
+        "cv_processed": False,
         "waiting_for_job_selection": None,
         "selected_jobs": None,
         "optimized_cvs": None,
@@ -741,9 +828,40 @@ def initial_state_creator() -> JobScraperState:
     return state
 
 
+def should_wait_for_cv(state: JobScraperState) -> str:
+    log("Evaluating should_wait_for_cv with state keys: " + ", ".join(
+        state.keys()))
+
+    # If CV is already processed, skip to ranking
+    if state.get("cv_processed"):
+        return "rank_jobs"
+
+    # If we already have CV data
+    if state.get("cv_data") is not None:
+        return "rank_jobs"
+
+    # If we have a CV file path but haven't processed it yet, process it
+    if state.get("cv_file_path") and not state.get("cv_text"):
+        return "collect_cv"
+
+    # If we've explicitly been told to wait for CV and have user input (CV content)
+    if state.get("waiting_for_cv", False) and (
+            state.get("user_input") is not None or state.get(
+            "cv_file_path") is not None):
+        return "collect_cv"
+
+    # Default: proceed to ranking (possibly without CV)
+    return "rank_jobs"
+
+
+# Update the conditional routing function for user preferences
 def should_wait_for_preferences(state: JobScraperState) -> str:
     log("Evaluating should_wait_for_preferences with state keys: " + ", ".join(
         state.keys()))
+
+    # If we explicitly have preference input, collect preferences
+    if state.get("preference_input") is not None:
+        return "collect_user_preferences"
 
     # If we're explicitly waiting for preferences and have user input
     if state.get("waiting_for_preferences", False) and state.get(
@@ -758,27 +876,14 @@ def should_wait_for_preferences(state: JobScraperState) -> str:
     return "filter_jobs"
 
 
-def should_wait_for_cv(state: JobScraperState) -> str:
-    log("Evaluating should_wait_for_cv with state keys: " + ", ".join(
-        state.keys()))
-
-    # If we've explicitly been told to wait for CV and have user input (CV content)
-    if state.get("waiting_for_cv", False) and state.get(
-            "user_input") is not None:
-        return "collect_cv"
-
-    # If we already have CV data or we don't need to wait for CV
-    if state.get("cv_data") is not None or not state.get("waiting_for_cv",
-                                                         False):
-        return "rank_jobs"
-
-    # Default: proceed to ranking (possibly without CV)
-    return "rank_jobs"
-
-
+# Update the conditional routing function for job selection
 def should_wait_for_job_selection(state: JobScraperState) -> str:
     log("Evaluating should_wait_for_job_selection with state keys: " + ", ".join(
         state.keys()))
+
+    # If we explicitly have job selection input, collect the selection
+    if state.get("job_selection_input") is not None:
+        return "collect_job_selection"
 
     # If we're waiting for job selection and have user input
     if state.get("waiting_for_job_selection", False) and state.get(

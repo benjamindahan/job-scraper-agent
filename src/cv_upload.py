@@ -15,11 +15,12 @@ logging.basicConfig(level=logging.INFO,
                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+
 async def process_cv_file(
-    file_path: Optional[str] = None,
-    file_content: Optional[bytes] = None,
-    file_name: Optional[str] = None,
-    current_state: Optional[Dict[str, Any]] = None
+        file_path: Optional[str] = None,
+        file_content: Optional[bytes] = None,
+        file_name: Optional[str] = None,
+        current_state: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
     Process a CV file and prepare it for the graph.
@@ -46,7 +47,8 @@ async def process_cv_file(
         logger.error(f"Error extracting text from file: {result['error']}")
         return {'error': result['error']}
 
-    logger.info(f"Successfully extracted {len(result['text'])} characters from file")
+    logger.info(
+        f"Successfully extracted {len(result['text'])} characters from file")
 
     # Get or create graph state
     state = current_state.copy() if current_state else initial_state_creator()
@@ -58,9 +60,15 @@ async def process_cv_file(
         # Store the file name in the state
         state['cv_file_name'] = file_name
 
-    # Set the extracted text as user input
-    # This maintains compatibility with the existing flow
-    state['user_input'] = result['text']
+    # Store the CV text but don't set it as user_input
+    # This avoids confusion with other user input types
+    state['cv_text'] = result['text']
+
+    # Set the flag to process the CV on the next graph invocation
+    state['waiting_for_cv'] = True
+
+    # Mark CV as not yet processed
+    state['cv_processed'] = False
 
     return state
 
@@ -90,11 +98,11 @@ async def process_cv_file_and_invoke_graph(
         return state
 
     # Ensure we actually have text extracted from the CV
-    if not state.get('user_input'):
+    if not state.get('cv_text'):
         logger.error("No text extracted from CV file")
         return {'error': "No text could be extracted from the CV file"}
 
     # Set up the state to continue with the normal job search flow
     # Instead of trying to invoke the graph directly
-    logger.info(f"Successfully processed CV with {len(state.get('user_input', ''))} characters")
+    logger.info(f"Successfully processed CV with {len(state.get('cv_text', ''))} characters")
     return state

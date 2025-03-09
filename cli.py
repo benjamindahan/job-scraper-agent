@@ -36,6 +36,22 @@ async def run_agent(job_title: str, max_jobs: int = 20,
     state["job_title"] = job_title
     state["max_jobs"] = max_jobs
 
+    # NEW: Create a unique session ID for the graph that will persist across invocations
+    # This helps maintain contextual state in the graph
+    session_id = f"cli-session-{int(time.time())}"
+    config = {"configurable": {"thread_id": session_id}}
+    print(f"Session ID: {session_id}")
+
+    # Set CV file path in the initial state if provided
+    if cv_file_path:
+        if os.path.exists(cv_file_path):
+            state["cv_file_path"] = cv_file_path
+            state["cv_file_name"] = os.path.basename(cv_file_path)
+            state["waiting_for_cv"] = True
+            print(f"CV file loaded: {cv_file_path}")
+        else:
+            print(f"Warning: CV file not found at {cv_file_path}")
+
     # Use database-only mode if specified or if we've been rate-limited recently
     if use_db_only:
         print("Using database only (no scraping)...")
@@ -56,7 +72,6 @@ async def run_agent(job_title: str, max_jobs: int = 20,
     else:
         # Normal flow - will try scraping first, fall back to database
         print("Scraping job listings... (this may take a moment)")
-        config = {"configurable": {"thread_id": "cli-thread"}}
 
         # Run just the job search part of the graph
         state = await graph.ainvoke(state, config=config)
@@ -114,10 +129,11 @@ async def run_agent(job_title: str, max_jobs: int = 20,
 
     # Step 3: Filter jobs with user preferences
     print("\nFiltering jobs based on your preferences...")
-    state["user_input"] = user_prefs
+    state[
+        "preference_input"] = user_prefs  # Use the dedicated preference field
     state["waiting_for_preferences"] = True
 
-    config = {"configurable": {"thread_id": "cli-thread"}}
+    # NEW: We continue with the same session/config to maintain state
     state = await graph.ainvoke(state, config=config)
 
     filtered_jobs = state.get("filtered_jobs", [])
@@ -129,32 +145,8 @@ async def run_agent(job_title: str, max_jobs: int = 20,
     else:
         print(f"\n✅ Found {len(filtered_jobs)} jobs matching your preferences")
 
-    # Step 4: Process CV if provided
-    if cv_file_path:
-        if not os.path.exists(cv_file_path):
-            print(f"\n❌ Error: CV file not found at {cv_file_path}")
-            return
-
-        print(f"\n=== Processing CV ===")
-        print(f"Reading file: {cv_file_path}")
-
-        result = extract_text_from_file(file_path=cv_file_path)
-        if not result["success"]:
-            print(f"\n❌ Error extracting text from CV file: {result['error']}")
-            return
-
-        cv_text = result["text"]
-        print(f"✅ Successfully extracted {len(cv_text)} characters from CV")
-
-        # Process the CV and rank jobs
-        print("\nRanking jobs based on CV relevance...")
-        state["cv_file_path"] = cv_file_path
-        state["user_input"] = cv_text
-        state["waiting_for_cv"] = True
-        state[
-            "waiting_for_preferences"] = False  # Ensure we don't reprocess preferences
-
-        state = await graph.ainvoke(state, config=config)
+    # Step 4: Process CV if not already processed
+    # CV is already set in the initial state, so we don't need to do anything here
 
     # Step 5: Display ranked jobs and get user selection
     ranked_jobs = state.get("ranked_jobs", [])
@@ -184,10 +176,15 @@ async def run_agent(job_title: str, max_jobs: int = 20,
     job_selection = input(
         "\nSelect job numbers to optimize your CV for (e.g., '1,3'): ")
 
-    state["user_input"] = job_selection
+    # Use the dedicated job_selection_input field
+    state["job_selection_input"] = job_selection
     state["waiting_for_job_selection"] = True
-    state["waiting_for_cv"] = False  # Ensure we don't reprocess CV
 
+    # Make sure we're not reprocessing previous steps
+    state["waiting_for_cv"] = False
+    state["waiting_for_preferences"] = False
+
+    # NEW: Continue with the same session/config
     state = await graph.ainvoke(state, config=config)
 
     # Step 7: Display results
@@ -215,7 +212,8 @@ async def run_agent(job_title: str, max_jobs: int = 20,
             except Exception as e:
                 print(f"  Could not save to file: {str(e)}")
                 print("  Preview:")
-                print(f"  {cv_text[:200]}...")
+                print(f"  {cv_text[:200]}..."
+                      )
     else:
         print("\nNo CV optimizations were created. This might be because:")
         print("- No CV was provided")
