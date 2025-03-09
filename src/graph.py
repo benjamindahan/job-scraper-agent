@@ -195,16 +195,23 @@ def collect_user_preferences(state: JobScraperState) -> Dict[str, Any]:
             You are an assistant helping parse job preferences. Extract the following information from the user input:
 
             1. Experience level:
-               - If the user mentions specific years (e.g., "6 years"), extract this as a number
-               - If the user mentions "entry level" or "junior", set this to 0
-               - If the user mentions "mid-level", set this to 2
-               - If the user mentions "senior", set this to 5
-               - Default to 0 if unclear
+               - If the user mentions specific years (e.g., "6 years"), extract this as a number for min_experience
+               - If the user mentions a range (e.g., "2-4 years"), extract min_experience and max_experience
+               - If the user mentions "entry level" or "junior", set min_experience to 0 and max_experience to 2
+               - If the user mentions "mid-level", set min_experience to 2 and max_experience to 5
+               - If the user mentions "senior", set min_experience to 5 with no max_experience
+               - Default to min_experience = 0 with no max_experience if unclear
 
             2. Date range preference:
-               - Map to one of these values: "Anytime", "Last 24 hours", "Last Week", "Last Month"
+               - Extract precise date information, handling expressions like:
+               - "past 2 weeks" → "Last 2 Weeks"
+               - "last month" → "Last Month"
+               - "past week" → "Last Week"
+               - "recent" or "past few days" → "Last Week"
+               - "yesterday" or "24 hours" → "Last 24 hours"
+               - "past N days" → convert to appropriate format
+               - "past N weeks" → convert to appropriate format
                - Use "Anytime" as default
-               - If the user mentions "2 weeks" or similar, map to the closest option
 
             3. Preferred locations:
                - If the user specifies locations, find the best matches from this list: {location_str}
@@ -212,8 +219,9 @@ def collect_user_preferences(state: JobScraperState) -> Dict[str, Any]:
                - If the user says "any", "anywhere", or expresses no location preference, return an empty array
 
             Format your response as a valid JSON object with these fields:
-            - experience (int): years of experience (0 for entry level)
-            - date_range (string): one of the four values listed above
+            - min_experience (int): minimum years of experience
+            - max_experience (int or null): maximum years of experience (null if no upper limit)
+            - date_range (string): specific date range, including custom ranges like "Last 2 Weeks"
             - locations (array of strings): matched locations from the provided list or empty array for no preference
             """),
             HumanMessage(content=user_input)
@@ -229,16 +237,19 @@ def collect_user_preferences(state: JobScraperState) -> Dict[str, Any]:
 
         preferences = json.loads(json_str)
 
-        # Validate experience (ensure it's an integer)
-        if "experience" not in preferences or not isinstance(
-                preferences["experience"], int):
-            preferences["experience"] = 0
+        # Validate min_experience (ensure it's an integer)
+        if "min_experience" not in preferences or not isinstance(
+                preferences["min_experience"], int):
+            preferences["min_experience"] = 0
+
+        # Validate max_experience
+        if "max_experience" in preferences and not isinstance(
+                preferences["max_experience"], int) and preferences[
+            "max_experience"] is not None:
+            preferences["max_experience"] = None
 
         # Validate date_range
         if "date_range" not in preferences:
-            preferences["date_range"] = "Anytime"
-        elif preferences["date_range"] not in ["Anytime", "Last 24 hours",
-                                               "Last Week", "Last Month"]:
             preferences["date_range"] = "Anytime"
 
         # Validate and perform fuzzy location matching
@@ -261,6 +272,12 @@ def collect_user_preferences(state: JobScraperState) -> Dict[str, Any]:
                 preferences["locations"] = matched_locations
 
         log(f"Parsed preferences: {preferences}")
+
+        # Store the original search query in preferences for filtering
+        if state.get("job_title"):
+            preferences["search_query"] = state.get(
+                "job_title").lower().strip()
+
         state["user_preferences"] = preferences
         state["waiting_for_preferences"] = False
 
@@ -275,10 +292,17 @@ def collect_user_preferences(state: JobScraperState) -> Dict[str, Any]:
     except Exception as e:
         log(f"Error parsing preferences: {e}")
         state["user_preferences"] = {
-            "experience": 0,
+            "min_experience": 0,
+            "max_experience": None,
             "date_range": "Anytime",
             "locations": []  # Default to no location filter on error
         }
+
+        # Store the original search query in preferences for filtering
+        if state.get("job_title"):
+            state["user_preferences"]["search_query"] = state.get(
+                "job_title").lower().strip()
+
         state["waiting_for_preferences"] = False
 
         # Clear input fields after use
