@@ -334,20 +334,35 @@ async def extract_job_details(job_url: str, session: aiohttp.ClientSession) -> D
         return {}
 
 
-async def scrape_jobs(job_title: str, max_jobs: int = 20) -> List[Dict[str, Any]]:
+async def scrape_jobs(job_title: str, max_jobs: int = 20) -> List[
+    Dict[str, Any]]:
     """
     Main function to search for jobs and scrape detailed information.
     Will use cached results if available.
+
+    Args:
+        job_title: The job title to search for
+        max_jobs: Maximum number of jobs to retrieve
+
+    Returns:
+        List of job dictionaries with detailed information
     """
     # First check for cached results
     cached_jobs = check_cached_jobs(job_title)
     if cached_jobs:
         # If we have enough cached jobs, return them directly
         if len(cached_jobs) >= max_jobs:
-            logger.info(f"Using {min(len(cached_jobs), max_jobs)} cached jobs for query: {job_title}")
+            logger.info(
+                f"Using {min(len(cached_jobs), max_jobs)} cached jobs for query: {job_title}")
+
+            # Add the original search query to each job
+            for job in cached_jobs:
+                job['searched_job_title'] = job_title.lower().strip()
+
             return cached_jobs[:max_jobs]
         # Otherwise, we'll still do scraping but log that we're supplementing
-        logger.info(f"Found {len(cached_jobs)} cached jobs, but need {max_jobs}. Will scrape additional jobs.")
+        logger.info(
+            f"Found {len(cached_jobs)} cached jobs, but need {max_jobs}. Will scrape additional jobs.")
 
     async with aiohttp.ClientSession() as session:
         # Search for jobs
@@ -356,7 +371,13 @@ async def scrape_jobs(job_title: str, max_jobs: int = 20) -> List[Dict[str, Any]
         if not job_listings:
             # If scraping failed but we have some cached results, return those
             if cached_jobs:
-                logger.warning(f"Scraping failed, using {len(cached_jobs)} cached jobs for query: {job_title}")
+                logger.warning(
+                    f"Scraping failed, using {len(cached_jobs)} cached jobs for query: {job_title}")
+
+                # Add the original search query to each job
+                for job in cached_jobs:
+                    job['searched_job_title'] = job_title.lower().strip()
+
                 return cached_jobs
             logger.warning(f"No jobs found for query: {job_title}")
             return []
@@ -378,9 +399,19 @@ async def scrape_jobs(job_title: str, max_jobs: int = 20) -> List[Dict[str, Any]
         # Filter out empty results
         jobs = [job for job in job_details if job]
 
+        # Add the original search query to each job
+        for job in jobs:
+            job['searched_job_title'] = job_title.lower().strip()
+
         if not jobs and cached_jobs:
             # If all scraping failed but we have cached results, use those
-            logger.warning(f"Detailed scraping failed, using {len(cached_jobs)} cached jobs")
+            logger.warning(
+                f"Detailed scraping failed, using {len(cached_jobs)} cached jobs")
+
+            # Add the original search query to each cached job
+            for job in cached_jobs:
+                job['searched_job_title'] = job_title.lower().strip()
+
             return cached_jobs
 
         return jobs
