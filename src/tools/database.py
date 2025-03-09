@@ -23,7 +23,7 @@ def init_database() -> None:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    # Create jobs table
+    # Create jobs table with new searched_job_title column
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS jobs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,21 +38,31 @@ def init_database() -> None:
         experience_text TEXT,
         description TEXT,
         url TEXT UNIQUE,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        searched_job_title TEXT
     )
     ''')
+
+    # Check if searched_job_title column exists, add it if not
+    cursor.execute("PRAGMA table_info(jobs)")
+    columns = [column[1] for column in cursor.fetchall()]
+
+    if 'searched_job_title' not in columns:
+        logger.info("Adding searched_job_title column to jobs table")
+        cursor.execute('ALTER TABLE jobs ADD COLUMN searched_job_title TEXT')
 
     conn.commit()
     conn.close()
     logger.info("Database initialized successfully")
 
 
-def store_jobs(jobs: List[Dict[str, Any]]) -> int:
+def store_jobs(jobs: List[Dict[str, Any]], search_query: Optional[str] = None) -> int:
     """
     Store multiple job listings in the database.
 
     Args:
         jobs: List of job dictionaries to store
+        search_query: The original search query used to find these jobs
 
     Returns:
         Number of jobs successfully stored
@@ -70,11 +80,14 @@ def store_jobs(jobs: List[Dict[str, Any]]) -> int:
             if isinstance(job.get('publication_date'), datetime):
                 job['publication_date'] = job['publication_date'].isoformat()
 
+            # Include the search query as searched_job_title
+            job_search_query = search_query or job.get('searched_job_title', '')
+
             cursor.execute('''
             INSERT OR REPLACE INTO jobs 
             (job_title, company_name, publication_date, category, job_type, 
-             education_level, location, experience_years, experience_text, description, url, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             education_level, location, experience_years, experience_text, description, url, created_at, searched_job_title)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 job.get('job_title', ''),
                 job.get('company_name', ''),
@@ -87,7 +100,8 @@ def store_jobs(jobs: List[Dict[str, Any]]) -> int:
                 job.get('experience_text', ''),
                 job.get('description', ''),
                 job.get('url', ''),
-                datetime.now().isoformat()
+                datetime.now().isoformat(),
+                job_search_query
             ))
             count += 1
         except Exception as e:
@@ -145,8 +159,16 @@ def get_jobs_by_title(job_title: str, limit: int = 100) -> List[Dict[str, Any]]:
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    query = "SELECT * FROM jobs WHERE job_title LIKE ? ORDER BY publication_date DESC LIMIT ?"
-    cursor.execute(query, (f"%{job_title}%", limit))
+    # Improved search using OR and LIKE for searched_job_title
+    query = """
+    SELECT * FROM jobs WHERE 
+    job_title LIKE ? 
+    OR searched_job_title LIKE ? 
+    ORDER BY publication_date DESC LIMIT ?
+    """
+
+    search_term = f"%{job_title}%"
+    cursor.execute(query, (search_term, search_term, limit))
 
     jobs = []
     for row in cursor.fetchall():
@@ -184,15 +206,19 @@ def get_unique_locations() -> List[str]:
 
 
 def filter_jobs(min_experience: Optional[int] = None,
+                max_experience: Optional[int] = None,
                 locations: Optional[List[str]] = None,
-                date_range: Optional[str] = None) -> List[Dict[str, Any]]:
+                date_range: Optional[str] = None,
+                search_query: Optional[str] = None) -> List[Dict[str, Any]]:
     """
-    Filter jobs based on user preferences.
+    Filter jobs based on user preferences with enhanced date handling.
 
     Args:
         min_experience: Minimum years of experience required
+        max_experience: Maximum years of experience (new parameter)
         locations: List of acceptable locations
-        date_range: Time filter (e.g., "Last 24 hours", "Last Week", "Last Month")
+        date_range: Time filter (e.g., "Last 24 hours", "Last Week", "Last Month", "Last 2 Weeks")
+        search_query: Original search query to filter by job title
 
     Returns:
         List of filtered job dictionaries
@@ -204,10 +230,14 @@ def filter_jobs(min_experience: Optional[int] = None,
     query = 'SELECT * FROM jobs WHERE 1=1'
     params = []
 
-    # Add experience filter
+    # Add experience filter - with min and max bounds
     if min_experience is not None:
-        query += ' AND experience_years >= ?'
+        query += ' AND (experience_years >= ? OR experience_years = 0)'  # Include jobs that don't specify experience
         params.append(min_experience)
+
+    if max_experience is not None:
+        query += ' AND (experience_years <= ? OR experience_years = 0)'  # Include jobs that don't specify experience
+        params.append(max_experience)
 
     # Add location filter
     if locations and len(locations) > 0:
@@ -215,24 +245,47 @@ def filter_jobs(min_experience: Optional[int] = None,
         query += f' AND location IN ({placeholders})'
         params.extend(locations)
 
-    # Add date filter
+    # Add date filter with enhanced handling
     if date_range:
         current_date = datetime.now()
+        days = None
 
+        # Handle various date range formats
         if date_range == "Last 24 hours":
             days = 1
+        elif date_range == "Last 48 hours":
+            days = 2
         elif date_range == "Last Week":
             days = 7
+        elif date_range == "Last 2 Weeks":
+            days = 14
         elif date_range == "Last Month":
             days = 30
-        else:
-            days = None
+        elif date_range.lower().startswith("last "):
+            # Try to parse custom ranges like "Last X days"
+            try:
+                parts = date_range.lower().split()
+                if len(parts) >= 3 and parts[0] == "last" and parts[2] in ["days", "day", "weeks", "week"]:
+                    num = int(parts[1])
+                    if parts[2] in ["weeks", "week"]:
+                        days = num * 7
+                    else:
+                        days = num
+            except (ValueError, IndexError):
+                days = None
 
         if days:
             cutoff_date = (current_date - timedelta(days=days)).isoformat()
-
             query += ' AND publication_date >= ?'
             params.append(cutoff_date)
+
+    # Add search query filter
+    if search_query:
+        # Search in both job_title and searched_job_title for better matching
+        query += ' AND (job_title LIKE ? OR searched_job_title LIKE ?)'
+        search_term = f"%{search_query}%"
+        params.append(search_term)
+        params.append(search_term)
 
     # Order by publication date (newest first)
     query += ' ORDER BY publication_date DESC'
