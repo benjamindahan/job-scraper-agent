@@ -50,6 +50,7 @@ class UserPreferences(BaseModel):
     locations: List[str] = Field(description="List of acceptable job locations")
 
 # Define our state
+# Define our state
 class JobScraperState(TypedDict):
     """State for the job scraper graph."""
     # User inputs
@@ -67,6 +68,8 @@ class JobScraperState(TypedDict):
     user_preferences: Optional[Dict[str, Any]]
     available_locations: Optional[List[str]]
     waiting_for_preferences: Optional[bool]
+    last_filter_prefs: Optional[Dict[str, Any]]  # To track if preferences changed
+    force_refilter: Optional[bool]  # Flag to force refiltering even if preferences haven't changed
 
     # Filtered results
     filtered_jobs: Optional[List[Dict[str, Any]]]
@@ -125,6 +128,12 @@ async def search_jobs_node(state: JobScraperState) -> Dict[str, Any]:
 
     if db_jobs and len(db_jobs) > 0:
         log(f"Found {len(db_jobs)} jobs in database for '{job_title}'")
+
+        # Make sure all jobs have the search query in searched_job_title
+        for job in db_jobs:
+            if not job.get('searched_job_title'):
+                job['searched_job_title'] = job_title.lower().strip()
+
         state["jobs_data"] = db_jobs
         state["job_urls"] = [job.get("url", "") for job in db_jobs]
         log("Exiting search_jobs_node with state keys: " + ", ".join(
@@ -150,7 +159,8 @@ async def search_jobs_node(state: JobScraperState) -> Dict[str, Any]:
                 return state
 
         log(f"Scraped {len(jobs)} jobs")
-        store_jobs(jobs)
+        # Store jobs with the search query
+        store_jobs(jobs, job_title.lower().strip())
         state["jobs_data"] = jobs
         state["job_urls"] = [job.get("url", "") for job in jobs]
         log("Exiting search_jobs_node with state keys: " + ", ".join(
@@ -322,26 +332,39 @@ def filter_jobs_node(state: JobScraperState) -> Dict[str, Any]:
 
     # Get user preferences or use defaults
     prefs = state.get("user_preferences") or {
-        "experience": 0,
+        "min_experience": 0,
+        "max_experience": None,
         "date_range": "Anytime",
-        "locations": []  # Default to no location filtering
+        "locations": [],  # Default to no location filtering
+        "search_query": state.get("job_title", "").lower().strip()
+        # Include original search query
     }
 
     log(f"Filtering jobs with preferences: {prefs}")
 
     try:
+        # Avoid redundant filtering if we've already filtered with these preferences
+        if (state.get("filtered_jobs") and
+                state.get("last_filter_prefs") == prefs and
+                not state.get("force_refilter", False)):
+            log("Using existing filtered jobs (preferences unchanged)")
+            return state
+
         # Handle the case where we have no jobs data from scraping
         if not state.get("jobs_data"):
             log("No jobs data available for filtering")
             state["filtered_jobs"] = []
             state["waiting_for_cv"] = True
+            state["last_filter_prefs"] = prefs.copy()
             return state
 
         # First try with exact preferences
         filtered = filter_jobs(
-            min_experience=prefs.get("experience", 0),
+            min_experience=prefs.get("min_experience", 0),
+            max_experience=prefs.get("max_experience"),
             locations=prefs.get("locations", []),
-            date_range=prefs.get("date_range", "Anytime")
+            date_range=prefs.get("date_range", "Anytime"),
+            search_query=prefs.get("search_query")
         )
 
         # If no results with strict filtering, try more flexible approaches
@@ -349,9 +372,11 @@ def filter_jobs_node(state: JobScraperState) -> Dict[str, Any]:
             log("No jobs matched strict criteria, trying with only experience filter")
 
             filtered = filter_jobs(
-                min_experience=prefs.get("experience", 0),
+                min_experience=prefs.get("min_experience", 0),
+                max_experience=prefs.get("max_experience"),
                 locations=[],  # No location filter
-                date_range="Anytime"  # No date filter
+                date_range="Anytime",  # No date filter
+                search_query=prefs.get("search_query")
             )
 
             # If still no results and we have locations, try with just location
@@ -359,9 +384,23 @@ def filter_jobs_node(state: JobScraperState) -> Dict[str, Any]:
                 log("No jobs matched experience filter, trying with only location filter")
 
                 filtered = filter_jobs(
-                    min_experience=0,  # No experience filter
+                    min_experience=None,  # No experience filter
+                    max_experience=None,
                     locations=prefs.get("locations", []),
-                    date_range="Anytime"  # No date filter
+                    date_range="Anytime",  # No date filter
+                    search_query=prefs.get("search_query")
+                )
+
+            # If still no results with search query, try without it but keep other filters
+            if len(filtered) == 0:
+                log("No jobs matched with search query filter, trying without it")
+
+                filtered = filter_jobs(
+                    min_experience=prefs.get("min_experience", 0),
+                    max_experience=prefs.get("max_experience"),
+                    locations=prefs.get("locations", []),
+                    date_range=prefs.get("date_range", "Anytime"),
+                    search_query=None  # No search query filter
                 )
 
             # If still no results, return all jobs
@@ -371,7 +410,11 @@ def filter_jobs_node(state: JobScraperState) -> Dict[str, Any]:
 
         log(f"Filtered to {len(filtered)} matching jobs")
         state["filtered_jobs"] = filtered
+        state[
+            "last_filter_prefs"] = prefs.copy()  # Store preferences used for filtering
         state["waiting_for_cv"] = True  # Set to wait for CV if needed
+        state["force_refilter"] = False  # Reset force refilter flag
+
         log("Exiting filter_jobs_node with state keys: " + ", ".join(
             state.keys()))
         return state
@@ -835,6 +878,8 @@ def initial_state_creator() -> JobScraperState:
         "user_preferences": None,
         "available_locations": None,
         "waiting_for_preferences": None,
+        "last_filter_prefs": None,
+        "force_refilter": False,
         "filtered_jobs": None,
         "ranked_jobs": None,
         "cv_text": None,
