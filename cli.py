@@ -36,8 +36,7 @@ async def run_agent(job_title: str, max_jobs: int = 20,
     state["job_title"] = job_title
     state["max_jobs"] = max_jobs
 
-    # NEW: Create a unique session ID for the graph that will persist across invocations
-    # This helps maintain contextual state in the graph
+    # Create a unique session ID for the graph that will persist across invocations
     session_id = f"cli-session-{int(time.time())}"
     config = {"configurable": {"thread_id": session_id}}
     print(f"Session ID: {session_id}")
@@ -119,11 +118,13 @@ async def run_agent(job_title: str, max_jobs: int = 20,
 
     print("\n=== Job Search Preferences ===")
     print("Please enter your preferences:")
-    print("1. Experience level (e.g. 'entry level', '3 years', 'senior')")
-    print("2. Preferred location(s) or 'any' if no preference")
-    print("3. Date range (e.g. 'last week', 'last month', 'anytime')")
     print(
-        "\nExample: '3 years experience in Tel Aviv, posted in the last week'")
+        "1. Experience level (e.g. 'entry level', '3 years', 'senior', '2-5 years')")
+    print("2. Preferred location(s) or 'any' if no preference")
+    print(
+        "3. Date range (e.g. 'last week', 'past 2 weeks', 'last month', 'anytime')")
+    print(
+        "\nExample: '2-4 years experience in Tel Aviv, posted in the past 2 weeks'")
 
     user_prefs = input("\nYour preferences: ")
 
@@ -132,8 +133,9 @@ async def run_agent(job_title: str, max_jobs: int = 20,
     state[
         "preference_input"] = user_prefs  # Use the dedicated preference field
     state["waiting_for_preferences"] = True
+    state["force_refilter"] = True  # Force refiltering with new preferences
 
-    # NEW: We continue with the same session/config to maintain state
+    # Continue with the same session/config to maintain state
     state = await graph.ainvoke(state, config=config)
 
     filtered_jobs = state.get("filtered_jobs", [])
@@ -144,9 +146,6 @@ async def run_agent(job_title: str, max_jobs: int = 20,
         state["filtered_jobs"] = filtered_jobs
     else:
         print(f"\n✅ Found {len(filtered_jobs)} jobs matching your preferences")
-
-    # Step 4: Process CV if not already processed
-    # CV is already set in the initial state, so we don't need to do anything here
 
     # Step 5: Display ranked jobs and get user selection
     ranked_jobs = state.get("ranked_jobs", [])
@@ -166,8 +165,10 @@ async def run_agent(job_title: str, max_jobs: int = 20,
         if job.get('location'):
             print(f"   Location: {job.get('location')}")
         if job.get('experience_years') or job.get('experience_text'):
-            print(
-                f"   Experience: {job.get('experience_text', str(job.get('experience_years', '')) + ' years')}")
+            experience_text = job.get('experience_text', '')
+            if not experience_text and job.get('experience_years'):
+                experience_text = f"{job.get('experience_years')} years"
+            print(f"   Experience: {experience_text}")
         if job.get('relevance_score'):
             print(f"   Match Score: {job.get('relevance_score')}/100")
             print(f"   Reason: {job.get('relevance_explanation', 'N/A')}")
@@ -184,7 +185,7 @@ async def run_agent(job_title: str, max_jobs: int = 20,
     state["waiting_for_cv"] = False
     state["waiting_for_preferences"] = False
 
-    # NEW: Continue with the same session/config
+    # Continue with the same session/config
     state = await graph.ainvoke(state, config=config)
 
     # Step 7: Display results
@@ -212,8 +213,7 @@ async def run_agent(job_title: str, max_jobs: int = 20,
             except Exception as e:
                 print(f"  Could not save to file: {str(e)}")
                 print("  Preview:")
-                print(f"  {cv_text[:200]}..."
-                      )
+                print(f"  {cv_text[:200]}...")
     else:
         print("\nNo CV optimizations were created. This might be because:")
         print("- No CV was provided")

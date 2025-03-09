@@ -427,6 +427,7 @@ def filter_jobs_node(state: JobScraperState) -> Dict[str, Any]:
 
 def collect_cv(state: JobScraperState) -> Dict[str, Any]:
     log("Entered collect_cv with state keys: " + ", ".join(state.keys()))
+    llm = ChatOpenAI(model="gpt-4o", temperature=0)
 
     # Skip if CV has already been processed
     if state.get("cv_processed") or not state.get("waiting_for_cv"):
@@ -469,40 +470,211 @@ def collect_cv(state: JobScraperState) -> Dict[str, Any]:
         return state
 
     log("Processing CV...")
-    prompt = ChatPromptTemplate.from_messages([
-        SystemMessage(content="""
-        You are a CV analysis expert. Extract the following information from the provided CV:
-        1. List of technical and soft skills
-        2. Total years of professional experience (as an integer)
-        3. Highest level of education
-        4. Previous job titles
-        5. Industries worked in
 
-        Format your response as a JSON object with the following structure:
+    # First, identify the major sections and their raw text content
+    section_extraction_prompt = ChatPromptTemplate.from_messages([
+        SystemMessage(content="""
+        You are a CV section identifier. Your task is to extract the RAW TEXT content of each major section of a CV WITHOUT ANY INTERPRETATION OR MODIFICATION.
+
+        Follow these exact steps:
+        1. Identify these key sections in the CV: summary, personal_info, experience, education, skills, languages, other_activities
+        2. Extract the RAW TEXT for each section exactly as it appears
+        3. Return a JSON structure with each section name as a key and its RAW TEXT as the value
+
+        DO NOT:
+        - Interpret or summarize the content
+        - Restructure or reorganize the content
+        - Skip or omit any text
+        - Add any text that isn't in the original
+
+        Example output:
+        ```json
         {
-            "skills": ["skill1", "skill2", ...],
-            "experience_years": integer,
-            "education": "string",
-            "job_titles": ["title1", "title2", ...],
-            "industries": ["industry1", "industry2", ...]
+          "summary": "Full original text of the summary section...",
+          "personal_info": "Full original text of the contact/personal info section...",
+          "experience": "Full original text of all work experience exactly as shown...",
+          "education": "Full original text of all education entries exactly as shown...",
+          "skills": "Full original text of all skills sections exactly as shown...",
+          "languages": "Full original text of language proficiencies exactly as shown...",
+          "other_activities": "Full original text of any other sections exactly as shown..."
         }
+        ```
+
+        Remember, your ONLY task is to isolate the raw text content of each section while preserving EVERY WORD EXACTLY as it appears.
         """),
-        HumanMessage(content=cv_text)
+        HumanMessage(
+            content=f"Here is the CV to extract sections from:\n\n{cv_text}")
     ])
+
     try:
-        response = llm.invoke(prompt.format_messages())
-        log("LLM response for CV analysis: " + response.content)
-        json_match = re.search(r'```json\s*([\s\S]*?)\s*```', response.content)
-        json_str = json_match.group(1) if json_match else response.content
+        sections_response = llm.invoke(
+            section_extraction_prompt.format_messages())
+        log("Received sections extraction response")
+
+        # Extract and parse the JSON
+        json_match = re.search(r'```json\s*([\s\S]*?)\s*```',
+                               sections_response.content)
+        json_str = json_match.group(
+            1) if json_match else sections_response.content
         json_str = re.sub(r'^[^{]*', '', json_str)
         json_str = re.sub(r'[^}]*$', '', json_str)
-        cv_data = json.loads(json_str)
-        log(f"Extracted CV data: {cv_data}")
+        raw_sections = json.loads(json_str)
+
+        # Now parse each section's raw text
+        cv_data = {
+            "summary": "",
+            "personal_info": {},
+            "experience": [],
+            "education": [],
+            "skills": [],
+            "languages": {},
+            "other_activities": [],
+            "total_experience_years": 0
+        }
+
+        # Parse summary
+        cv_data["summary"] = raw_sections.get("summary", "").strip()
+
+        # Parse experience section with structured approach
+        experience_parsing_prompt = ChatPromptTemplate.from_messages([
+            SystemMessage(content="""
+            You are a CV experience parser. Your ONLY job is to extract the work experiences from a CV section AS EXACTLY WRITTEN with NO INTERPRETATION.
+
+            For each job position, extract:
+            1. The EXACT job title
+            2. The EXACT company name
+            3. The EXACT location
+            4. The EXACT dates
+            5. The EXACT and COMPLETE description with ALL bullet points, symbols (→), and formatting preserved VERBATIM
+
+            CRITICAL RULES:
+            - DO NOT interpret, restructure, or summarize ANY text
+            - Include EVERY bullet point, arrow (→), and formatting marker EXACTLY as written
+            - Maintain PRECISE association between each job and its description
+            - If text is ambiguous, include it EXACTLY as written rather than guessing
+            - DO NOT INVENT descriptions for any job
+            - COPY TEXT EXACTLY - word for word, character for character
+
+            Return a JSON array where each object represents ONE job with the properties: title, company, location, dates, description
+            """),
+            HumanMessage(
+                content=f"Here is the experience section text to parse EXACTLY AS WRITTEN:\n\n{raw_sections.get('experience', '')}")
+        ])
+
+        experience_response = llm.invoke(
+            experience_parsing_prompt.format_messages())
+        json_match = re.search(r'```json\s*([\s\S]*?)\s*```',
+                               experience_response.content)
+        json_str = json_match.group(
+            1) if json_match else experience_response.content
+        json_str = re.sub(r'^[^[]*', '', json_str)
+        json_str = re.sub(r'[^]]*$', '', json_str)
+
+        try:
+            experience_data = json.loads(json_str)
+            cv_data["experience"] = experience_data
+            log(f"Parsed {len(experience_data)} experience entries")
+        except Exception as e:
+            log(f"Error parsing experience JSON: {e}")
+            # Fall back to raw text
+            cv_data["experience"] = [
+                {"title": "SEE ORIGINAL CV", "company": "", "location": "",
+                 "dates": "",
+                 "description": raw_sections.get('experience', '')}]
+
+        # Repeat similar parsing for other sections...
+
+        # Education
+        education_parsing_prompt = ChatPromptTemplate.from_messages([
+            SystemMessage(content="""
+            You are a CV education parser. Extract the education entries EXACTLY as written with NO INTERPRETATION.
+
+            For each education entry, extract:
+            1. The EXACT degree name
+            2. The EXACT institution name
+            3. The EXACT location
+            4. The EXACT dates
+            5. The EXACT and COMPLETE description with ALL bullet points and formatting preserved VERBATIM
+
+            CRITICAL RULES:
+            - COPY TEXT EXACTLY - word for word, character for character
+            - DO NOT invent, summarize, or restructure ANY content
+
+            Return a JSON array where each object represents ONE education entry.
+            """),
+            HumanMessage(
+                content=f"Here is the education section text to parse EXACTLY AS WRITTEN:\n\n{raw_sections.get('education', '')}")
+        ])
+
+        education_response = llm.invoke(
+            education_parsing_prompt.format_messages())
+        json_match = re.search(r'```json\s*([\s\S]*?)\s*```',
+                               education_response.content)
+        json_str = json_match.group(
+            1) if json_match else education_response.content
+        json_str = re.sub(r'^[^[]*', '', json_str)
+        json_str = re.sub(r'[^]]*$', '', json_str)
+
+        try:
+            education_data = json.loads(json_str)
+            cv_data["education"] = education_data
+            log(f"Parsed {len(education_data)} education entries")
+        except Exception as e:
+            log(f"Error parsing education JSON: {e}")
+            cv_data["education"] = [
+                {"degree": "SEE ORIGINAL CV", "institution": "",
+                 "location": "", "dates": "",
+                 "description": raw_sections.get('education', '')}]
+
+        # Handle remaining simpler sections directly
+        cv_data["skills"] = raw_sections.get("skills", "")
+        cv_data["languages"] = raw_sections.get("languages", "")
+        cv_data["other_activities"] = raw_sections.get("other_activities", "")
+
+        # Extract personal info
+        personal_info_prompt = ChatPromptTemplate.from_messages([
+            SystemMessage(content="""
+            Extract ONLY the following personal information from the CV text:
+            - name (full name)
+            - contact (phone, email, location)
+
+            Return as simple JSON. ONLY include information explicitly stated in the text.
+            """),
+            HumanMessage(
+                content=f"Personal information section:\n\n{raw_sections.get('personal_info', '')}")
+        ])
+
+        personal_info_response = llm.invoke(
+            personal_info_prompt.format_messages())
+        json_match = re.search(r'```json\s*([\s\S]*?)\s*```',
+                               personal_info_response.content)
+        json_str = json_match.group(
+            1) if json_match else personal_info_response.content
+        json_str = re.sub(r'^[^{]*', '', json_str)
+        json_str = re.sub(r'[^}]*$', '', json_str)
+
+        try:
+            personal_info = json.loads(json_str)
+            cv_data["personal_info"] = personal_info
+        except Exception as e:
+            log(f"Error parsing personal info JSON: {e}")
+            cv_data["personal_info"] = {"name": "", "contact": {}}
+
+        # Estimate total experience years
+        # Look for explicit statement in summary first
+        years_match = re.search(r'(\d+)\s*years? of experience',
+                                cv_data["summary"])
+        if years_match:
+            cv_data["total_experience_years"] = int(years_match.group(1))
+        else:
+            # Default to conservative estimate
+            cv_data["total_experience_years"] = len(cv_data["experience"])
+
+        log(f"Final extracted CV data structure: {cv_data}")
         state["cv_text"] = cv_text
         state["cv_data"] = cv_data
         state["waiting_for_cv"] = False
-        state[
-            "cv_processed"] = True  # Mark CV as processed to avoid duplication
+        state["cv_processed"] = True
 
         # Clear user_input after use
         state["user_input"] = None
@@ -513,15 +685,17 @@ def collect_cv(state: JobScraperState) -> Dict[str, Any]:
         log(f"Error parsing CV: {e}")
         state["cv_text"] = cv_text
         state["cv_data"] = {
+            "summary": "",
+            "personal_info": {},
+            "experience": [],
+            "education": [],
             "skills": [],
-            "experience_years": 0,
-            "education": "Unknown",
-            "job_titles": [],
-            "industries": []
+            "languages": {},
+            "other_activities": [],
+            "total_experience_years": 0
         }
         state["waiting_for_cv"] = False
-        state[
-            "cv_processed"] = True  # Mark as processed even if there was an error
+        state["cv_processed"] = True
 
         # Clear user_input after use
         state["user_input"] = None
@@ -553,8 +727,7 @@ def rank_jobs_with_llm(state: JobScraperState) -> Dict[str, Any]:
             state.keys()))
         return state
 
-    # NEW: Smart re-use of existing rankings
-    # If we already have ranked jobs and just filtered the existing set
+    # Smart re-use of existing rankings
     if state.get("ranked_jobs") and filtered_jobs:
         # Extract the URLs of filtered jobs
         filtered_urls = {job.get("url", ""): job for job in filtered_jobs}
@@ -589,8 +762,26 @@ def rank_jobs_with_llm(state: JobScraperState) -> Dict[str, Any]:
     # Proceed with ranking if we have jobs and CV
     if filtered_jobs:
         ranked_jobs = []
-        # UPDATED: Increase batch size from 3 to 5 for efficiency
         batch_size = 5
+
+        # Get CV details for prompt
+        cv_summary = cv_data.get("summary", "")
+        cv_experience = cv_data.get("experience", [])
+        cv_skills = cv_data.get("skills", [])
+        cv_education = cv_data.get("education", [])
+        cv_total_years = cv_data.get("total_experience_years", 0)
+
+        # Create a consistent reference for experience levels
+        # This will serve as a baseline for all comparisons
+        experience_reference = {
+            "entry_level": 0,
+            "junior": 0.5,
+            "mid_level": 2,
+            "senior": 5,
+            "lead": 8,
+            "executive": 10
+        }
+
         for i in range(0, len(filtered_jobs), batch_size):
             batch = filtered_jobs[i:i + batch_size]
             jobs_text = ""
@@ -598,45 +789,74 @@ def rank_jobs_with_llm(state: JobScraperState) -> Dict[str, Any]:
                 jobs_text += f"\nJob {idx + 1}:\n"
                 jobs_text += f"Title: {job.get('job_title', 'Unknown')}\n"
                 jobs_text += f"Company: {job.get('company_name', 'Unknown')}\n"
-                jobs_text += f"Description: {job.get('description', 'No description')[:500]}...\n"
-                jobs_text += f"Experience Required: {job.get('experience_text', str(job.get('experience_years', 0)) + ' years')}\n"
                 jobs_text += f"Location: {job.get('location', 'Unknown')}\n"
+                jobs_text += f"Experience Required: {job.get('experience_text', str(job.get('experience_years', 0)) + ' years')}\n"
                 jobs_text += f"Education: {job.get('education_level', 'Unknown')}\n"
+                jobs_text += f"Description: {job.get('description', 'No description')[:800]}...\n"
                 jobs_text += "---\n"
 
-            cv_skills = ", ".join(cv_data.get("skills", []))
-            cv_exp = cv_data.get("experience_years", 0)
-            cv_education = cv_data.get("education", "Unknown")
-            cv_titles = ", ".join(cv_data.get("job_titles", []))
+            # Prepare experience lists
+            experience_titles = [exp.get('title', '') for exp in cv_experience
+                                 if exp.get('title')]
+            experience_descriptions = [exp.get('description', '') for exp in
+                                       cv_experience if exp.get('description')]
+
+            # Create a merged list of skills
+            all_skills = []
+            if isinstance(cv_skills, list):
+                all_skills.extend(cv_skills)
+            elif isinstance(cv_skills, dict):
+                for skill_category, skills in cv_skills.items():
+                    if isinstance(skills, list):
+                        all_skills.extend(skills)
 
             prompt = ChatPromptTemplate.from_messages([
                 SystemMessage(content=f"""
-                You are a job matching expert. Assess how well each job matches the candidate's profile.
+                You are an expert job matching specialist. Your task is to assess how well each job matches a candidate's profile with consistent and objective evaluation.
 
-                Candidate Profile:
-                - Skills: {cv_skills}
-                - Experience: {cv_exp} years
-                - Education: {cv_education}
-                - Previous Titles: {cv_titles}
+                # CANDIDATE PROFILE SUMMARY
+                {cv_summary}
 
+                # CANDIDATE EXPERIENCE
+                Total Relevant Experience: {cv_total_years} years
+                Recent Job Titles: {', '.join(experience_titles[:3]) if experience_titles else 'Unknown'}
+
+                # CANDIDATE SKILLS
+                {', '.join(all_skills[:20]) if all_skills else 'Unknown'}
+
+                # CANDIDATE EDUCATION
+                {cv_education[0].get('degree', 'Unknown') + ' from ' + cv_education[0].get('institution', 'Unknown') if cv_education else 'Unknown'}
+
+                # EVALUATION INSTRUCTIONS
                 For each job, provide:
-                1. A relevance score (0-100)
-                2. A brief explanation of the score
+                1. A relevance score (0-100) based on how well the candidate's profile matches the job requirements
+                2. A comprehensive explanation that addresses ALL of the following consistently:
+                   - Skills match (which specific skills match or don't match)
+                   - Experience level alignment (clearly state if the job requires MORE, LESS, or SIMILAR experience compared to candidate's {cv_total_years} years)
+                   - Educational requirements (higher, lower, or similar to candidate's)
+                   - Industry relevance (how relevant is the candidate's industry background)
+                   - Location considerations
+                   - Overall fit assessment
+
+                # SCORING GUIDELINES
+                - 90-100: Excellent match - skills, experience, and background are highly aligned
+                - 70-89: Good match - most key requirements align well with candidate profile
+                - 50-69: Moderate match - some alignment but notable gaps in skills or experience
+                - 30-49: Fair match - significant gaps but some transferable skills or experience
+                - 0-29: Poor match - minimal alignment between candidate and job requirements
+
+                # IMPORTANT CONSISTENCY RULES
+                - Always use the candidate's {cv_total_years} years of relevant experience as the fixed reference point
+                - For jobs with "More than X years" requirement, compare X directly to {cv_total_years}
+                - For each experience assessment, explicitly state whether the job requires MORE, LESS, or SIMILAR experience
+                - Use consistent terminology across all job evaluations
+                - Avoid contradictory assessments between similar jobs
+                - Focus on relevance of experience, not just total years
 
                 Format your response as a valid JSON array of objects, each with:
                 - job_index (integer): the job number (1, 2, 3, etc.)
                 - score (integer): 0-100 relevance score
-                - explanation (string): brief explanation
-                Example:
-                ```json
-                [
-                  {{
-                    "job_index": 1,
-                    "score": 85,
-                    "explanation": "Strong match for technical skills and experience"
-                  }}
-                ]
-                ```
+                - explanation (string): detailed explanation following the guidelines above
                 """),
                 HumanMessage(
                     content=f"Here are the jobs to evaluate: {jobs_text}")
@@ -795,58 +1015,122 @@ def collect_job_selection(state: JobScraperState) -> Dict[str, Any]:
 
         return state
 
+
 def optimize_cvs(state: JobScraperState) -> Dict[str, Any]:
     log("Entered optimize_cvs with state keys: " + ", ".join(state.keys()))
     selected_jobs = state.get("selected_jobs", [])
     cv_text = state.get("cv_text", "")
     cv_data = state.get("cv_data", {})
     ranked_jobs = state.get("ranked_jobs", [])
+
     if not selected_jobs or not cv_text:
         state["optimized_cvs"] = {}
         log("No selected jobs or CV provided; exiting optimize_cvs.")
         return state
+
     log(f"Optimizing CV for {len(selected_jobs)} jobs...")
     optimized_cvs = {}
+
     for job_url in selected_jobs:
         job_details = None
         for job in ranked_jobs:
             if job.get("url") == job_url:
                 job_details = job
                 break
+
         if not job_details:
             log(f"No job details found for URL: {job_url}")
             continue
+
         job_title = job_details.get("job_title", "Unknown Position")
         company_name = job_details.get("company_name", "Unknown Company")
         job_description = job_details.get("description", "")
+
         try:
+            # Create a structured representation of the CV sections
+            cv_structure = ""
+            if cv_data.get("summary"):
+                cv_structure += f"# CV SUMMARY\n{cv_data.get('summary')}\n\n"
+
+            cv_structure += "# EXPERIENCE SECTIONS\n"
+            for idx, exp in enumerate(cv_data.get("experience", [])):
+                cv_structure += f"## Experience {idx + 1}:\n"
+                cv_structure += f"Title: {exp.get('title', 'Unknown')}\n"
+                cv_structure += f"Company: {exp.get('company', 'Unknown')}\n"
+                cv_structure += f"Dates: {exp.get('dates', 'Unknown')}\n"
+                cv_structure += f"Description:\n{exp.get('description', 'No description')}\n\n"
+
+            cv_structure += "# EDUCATION SECTIONS\n"
+            for idx, edu in enumerate(cv_data.get("education", [])):
+                cv_structure += f"## Education {idx + 1}:\n"
+                cv_structure += f"Degree: {edu.get('degree', 'Unknown')}\n"
+                cv_structure += f"Institution: {edu.get('institution', 'Unknown')}\n"
+                cv_structure += f"Dates: {edu.get('dates', 'Unknown')}\n"
+                cv_structure += f"Achievements: {edu.get('achievements', 'None')}\n\n"
+
+            cv_structure += "# SKILLS SECTION\n"
+            if isinstance(cv_data.get("skills"), list):
+                cv_structure += ", ".join(cv_data.get("skills", []))
+            elif isinstance(cv_data.get("skills"), dict):
+                for category, skills in cv_data.get("skills", {}).items():
+                    cv_structure += f"{category}: {', '.join(skills)}\n"
+
             prompt = ChatPromptTemplate.from_messages([
                 SystemMessage(content=f"""
-                You are a CV optimization expert. Improve the candidate's CV to better match the job.
-                
-                Job Details:
+                You are an expert CV optimization consultant. Your task is to provide specific, actionable recommendations for modifying a CV to better match a job description.
+
+                # JOB DETAILS
                 Title: {job_title}
                 Company: {company_name}
-                Description: {job_description[:1000]}...
-                
-                Guidelines:
-                1. Highlight relevant skills and experiences
-                2. Use keywords from the job description
-                3. Quantify achievements where possible
-                4. Keep the same overall format as the original CV
-                5. Maintain the person's actual experience and education (don't fabricate)
-                
-                Return the optimized CV in full.
+                Description: {job_description[:1500]}...
+
+                # INSTRUCTIONS
+                Analyze the CV structure and job description to identify optimization opportunities. 
+
+                Provide your recommendations in the following structure:
+
+                1. **OVERALL ASSESSMENT**: Brief evaluation of how well the CV matches the job requirements.
+
+                2. **SUMMARY SECTION OPTIMIZATION**: 
+                   - How to modify the professional summary to better align with this specific job
+                   - Provide a concrete rewritten version
+
+                3. **EXPERIENCE HIGHLIGHTS**: For each relevant experience section:
+                   - Which experiences to emphasize for this job
+                   - How to reword bullet points to highlight relevant skills/achievements
+                   - Provide specific rewording suggestions for key bullet points
+                   - Which experiences to de-emphasize (if any)
+
+                4. **SKILLS EMPHASIS**:
+                   - Which skills to highlight prominently for this role
+                   - Which skills might be less relevant and could be de-emphasized
+
+                5. **EDUCATION PRESENTATION**:
+                   - How to present education for this role
+                   - Any specific aspects to highlight
+
+                # IMPORTANT GUIDELINES
+                - NEVER invent new experiences, companies, or roles
+                - Recommend rewording and emphasis changes only, not fabrication
+                - Be specific about what sections to modify and exactly how to modify them
+                - Provide actual text rewrites for key sections, not just general suggestions
+                - Focus on highlighting most relevant experiences without changing the factual content
+                - Tailor keywords and terminology to match the job description
                 """),
-                HumanMessage(content=f"Original CV:\n\n{cv_text}")
+                HumanMessage(
+                    content=f"Here is the CV structure to optimize:\n\n{cv_structure}")
             ])
+
             response = llm.invoke(prompt.format_messages())
-            optimized_cv = response.content
+            optimization_recommendations = response.content
+
             log(f"Optimized CV for {job_title} at {company_name}")
             key = f"{company_name} - {job_title}"
-            optimized_cvs[key] = optimized_cv
+            optimized_cvs[key] = optimization_recommendations
+
         except Exception as e:
             log(f"Error optimizing CV for {job_title}: {e}")
+
     state["optimized_cvs"] = optimized_cvs
     log("Exiting optimize_cvs with state keys: " + ", ".join(state.keys()))
     return state
